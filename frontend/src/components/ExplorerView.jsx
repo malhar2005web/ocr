@@ -172,7 +172,7 @@ export default function ExplorerView({ onSelectDocument }) {
                   <tr key={doc.id}>
                     <td style={{ fontWeight: 600 }}>{doc.filename}</td>
                     <td>
-                      <span style={{ textTransform: 'capitalize', color: '#cbd5e1' }}>
+                      <span style={{ textTransform: 'capitalize', color: 'var(--text-muted)' }}>
                         {(doc.document_type || 'unclassified').replace('_', ' ')}
                       </span>
                     </td>

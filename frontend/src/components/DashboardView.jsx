@@ -57,7 +57,7 @@ export default function DashboardView({ onNavigate, onSelectDocument }) {
       {/* Metrics Row */}
       <div className="metrics-grid">
         <div className="card metric-card">
-          <div className="metric-icon-wrap" style={{ background: 'rgba(99, 102, 241, 0.15)', color: '#6366f1' }}>
+          <div className="metric-icon-wrap" style={{ background: 'var(--tiffany-tint)', color: 'var(--tiffany-deep)' }}>
             <FileText size={28} />
           </div>
           <div>

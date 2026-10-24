@@ -110,10 +110,10 @@ export default function UploadView({ onSelectDocument }) {
           style={{ display: 'none' }}
           onChange={handleChange}
         />
-        <div style={{ width: 64, height: 64, margin: '0 auto 16px', borderRadius: '50%', background: 'rgba(99, 102, 241, 0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--primary)' }}>
+        <div style={{ width: 64, height: 64, margin: '0 auto 16px', borderRadius: '50%', background: 'var(--tiffany-tint)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--tiffany-deep)' }}>
           <FileUp size={32} />
         </div>
-        <h3 style={{ fontSize: '1.2rem', fontWeight: 600, color: '#fff', marginBottom: 8 }}>
+        <h3 style={{ fontSize: '1.2rem', fontWeight: 600, color: 'var(--text-main)', marginBottom: 8 }}>
           Drag & Drop PDF or Image files here
         </h3>
         <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginBottom: 18 }}>
@@ -151,13 +151,13 @@ export default function UploadView({ onSelectDocument }) {
                     alignItems: 'center',
                     justifyContent: 'space-between',
                     padding: '14px 18px',
-                    background: 'rgba(15, 23, 42, 0.6)',
+                    background: 'var(--bg-subtle)',
                     border: '1px solid var(--border-subtle)',
                     borderRadius: 'var(--radius-md)'
                   }}
                 >
                   <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-                    <div style={{ padding: 8, borderRadius: 6, background: 'rgba(255, 255, 255, 0.05)', color: 'var(--text-muted)' }}>
+                    <div style={{ padding: '6px 10px', borderRadius: 6, background: 'var(--tiffany-tint)', color: 'var(--tiffany-deep)', fontWeight: 700, fontSize: '0.75rem' }}>
                       {file.name.endsWith('.pdf') ? 'PDF' : 'IMG'}
                     </div>
                     <div>

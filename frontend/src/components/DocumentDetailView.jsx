@@ -138,7 +138,7 @@ export default function DocumentDetailView({ documentId, onBack }) {
             </div>
           </div>
 
-          <div style={{ flex: 1, background: '#05070d', display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 650 }}>
+          <div style={{ flex: 1, background: 'var(--bg-subtle)', display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 650, borderRadius: 'var(--radius-md)' }}>
             {isPdf ? (
               <iframe 
                 src={`${downloadUrl}#toolbar=0`} 
@@ -200,7 +200,7 @@ export default function DocumentDetailView({ documentId, onBack }) {
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--warning)', fontWeight: 600, fontSize: '0.88rem' }}>
                     <AlertTriangle size={16} /> Validation Notice:
                   </div>
-                  <ul style={{ margin: '6px 0 0 24px', fontSize: '0.82rem', color: '#fef3c7' }}>
+                  <ul style={{ margin: '6px 0 0 24px', fontSize: '0.82rem', color: 'var(--warning)' }}>
                     {validation.issues.map((iss, idx) => (
                       <li key={idx}>{iss.message}</li>
                     ))}
@@ -210,26 +210,26 @@ export default function DocumentDetailView({ documentId, onBack }) {
 
               {/* Document Overview Summary Cards */}
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12, marginBottom: 24 }}>
-                <div style={{ padding: '12px 16px', background: 'rgba(255, 255, 255, 0.03)', borderRadius: 8, border: '1px solid var(--border-subtle)' }}>
+                <div style={{ padding: '12px 16px', background: 'var(--bg-subtle)', borderRadius: 8, border: '1px solid var(--border-subtle)' }}>
                   <div style={{ fontSize: '0.75rem', color: 'var(--text-dim)', textTransform: 'uppercase' }}>Classification</div>
-                  <div style={{ fontSize: '1.05rem', fontWeight: 700, color: '#fff', textTransform: 'capitalize' }}>
+                  <div style={{ fontSize: '1.05rem', fontWeight: 700, color: 'var(--text-main)', textTransform: 'capitalize' }}>
                     {document_type.replace('_', ' ')}
                   </div>
                 </div>
 
                 {content?.custom_fields?.grand_total && (
-                  <div style={{ padding: '12px 16px', background: 'rgba(16, 185, 129, 0.08)', borderRadius: 8, border: '1px solid rgba(16, 185, 129, 0.2)' }}>
+                  <div style={{ padding: '12px 16px', background: 'var(--success-bg)', borderRadius: 8, border: '1px solid var(--success-border)' }}>
                     <div style={{ fontSize: '0.75rem', color: 'var(--success)', textTransform: 'uppercase' }}>Grand Total</div>
-                    <div style={{ fontSize: '1.15rem', fontWeight: 700, color: '#fff' }}>
+                    <div style={{ fontSize: '1.15rem', fontWeight: 700, color: 'var(--text-main)' }}>
                       ₹{Number(content.custom_fields.grand_total).toLocaleString('en-IN')}
                     </div>
                   </div>
                 )}
 
                 {metadata?.dates?.length > 0 && (
-                  <div style={{ padding: '12px 16px', background: 'rgba(255, 255, 255, 0.03)', borderRadius: 8, border: '1px solid var(--border-subtle)' }}>
+                  <div style={{ padding: '12px 16px', background: 'var(--bg-subtle)', borderRadius: 8, border: '1px solid var(--border-subtle)' }}>
                     <div style={{ fontSize: '0.75rem', color: 'var(--text-dim)', textTransform: 'uppercase' }}>Detected Dates</div>
-                    <div style={{ fontSize: '0.92rem', fontWeight: 600, color: '#fff' }}>
+                    <div style={{ fontSize: '0.92rem', fontWeight: 600, color: 'var(--text-main)' }}>
                       {metadata.dates.join(', ')}
                     </div>
                   </div>
@@ -244,9 +244,9 @@ export default function DocumentDetailView({ documentId, onBack }) {
                   </h3>
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
                     {content.key_value_pairs.map((kv, idx) => (
-                      <div key={idx} style={{ padding: '8px 12px', background: 'rgba(15, 23, 42, 0.5)', borderRadius: 6, border: '1px solid var(--border-subtle)' }}>
+                      <div key={idx} style={{ padding: '8px 12px', background: 'var(--bg-subtle)', borderRadius: 6, border: '1px solid var(--border-subtle)' }}>
                         <div style={{ fontSize: '0.72rem', color: 'var(--text-dim)', fontWeight: 500 }}>{kv.key}</div>
-                        <div style={{ fontSize: '0.88rem', fontWeight: 600, color: '#fff', wordBreak: 'break-word' }}>
+                        <div style={{ fontSize: '0.88rem', fontWeight: 600, color: 'var(--text-main)', wordBreak: 'break-word' }}>
                           {String(kv.value)}
                         </div>
                       </div>
@@ -348,9 +348,9 @@ export default function DocumentDetailView({ documentId, onBack }) {
                         maxWidth: '85%',
                         padding: '12px 16px',
                         borderRadius: 'var(--radius-md)',
-                        background: msg.role === 'user' ? 'var(--gradient-primary)' : 'rgba(15, 23, 42, 0.8)',
-                        border: msg.role === 'user' ? 'none' : '1px solid var(--border-subtle)',
-                        color: '#fff',
+                        background: msg.role === 'user' ? 'var(--tiffany)' : 'var(--bg-subtle)',
+                        border: '1px solid var(--border-subtle)',
+                        color: msg.role === 'user' ? 'var(--text-on-primary)' : 'var(--text-main)',
                         fontSize: '0.88rem'
                       }}
                     >
@@ -414,19 +414,19 @@ export default function DocumentDetailView({ documentId, onBack }) {
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, fontSize: '0.85rem' }}>
                   <div>
                     <span style={{ color: 'var(--text-dim)' }}>PDF Ingestion Method: </span>
-                    <strong style={{ color: '#fff' }}>{extraction_metadata?.pdf_method || 'N/A'}</strong>
+                    <strong style={{ color: 'var(--text-main)' }}>{extraction_metadata?.pdf_method || 'N/A'}</strong>
                   </div>
                   <div>
                     <span style={{ color: 'var(--text-dim)' }}>OCR Engine: </span>
-                    <strong style={{ color: '#fff' }}>{extraction_metadata?.ocr_engine || 'None'}</strong>
+                    <strong style={{ color: 'var(--text-main)' }}>{extraction_metadata?.ocr_engine || 'None'}</strong>
                   </div>
                   <div>
                     <span style={{ color: 'var(--text-dim)' }}>LLM Provider: </span>
-                    <strong style={{ color: '#fff' }}>{extraction_metadata?.llm_provider || 'Heuristic Fallback'}</strong>
+                    <strong style={{ color: 'var(--text-main)' }}>{extraction_metadata?.llm_provider || 'Heuristic Fallback'}</strong>
                   </div>
                   <div>
                     <span style={{ color: 'var(--text-dim)' }}>Extraction Mode: </span>
-                    <strong style={{ color: '#fff' }}>{extraction_metadata?.extraction_mode || 'ocr_only'}</strong>
+                    <strong style={{ color: 'var(--text-main)' }}>{extraction_metadata?.extraction_mode || 'ocr_only'}</strong>
                   </div>
                 </div>
               </div>
