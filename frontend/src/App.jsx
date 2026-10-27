@@ -33,11 +33,13 @@ export default function App() {
       {/* Sidebar Navigation */}
       <aside className="sidebar">
         <div className="sidebar-brand">
-          <div className="brand-icon">
-            <Layers size={20} />
-          </div>
+          <img 
+            src="/pcs_logo.png" 
+            alt="PCS Logo" 
+            className="brand-logo-img" 
+          />
           <div>
-            <div className="brand-title">DocuIntel</div>
+            <div className="brand-title">PCS DocuIntel</div>
             <span className="brand-badge">Universal Platform</span>
           </div>
         </div>

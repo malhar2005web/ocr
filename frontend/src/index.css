@@ -155,6 +155,23 @@ body {
   border-bottom: 1px solid var(--border-subtle);
 }
 
+.brand-logo-img {
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  object-fit: cover;
+  box-shadow: 0 2px 8px rgba(10, 186, 181, 0.25);
+  border: 2px solid #ffffff;
+  background: #ffffff;
+  flex-shrink: 0;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.brand-logo-img:hover {
+  transform: scale(1.06);
+  box-shadow: 0 4px 12px rgba(10, 186, 181, 0.4);
+}
+
 .brand-icon {
   width: 38px;
   height: 38px;
