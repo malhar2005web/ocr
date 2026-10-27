@@ -74,9 +74,13 @@ export default function DocumentDetailView({ documentId, onBack }) {
     loadDoc();
   }, [documentId]);
 
+  const displayJson = doc?.content?.custom_fields?.contract_and_invoice_details 
+    ? doc.content.custom_fields 
+    : (doc?.normalized_json || doc);
+
   const handleCopyJSON = async () => {
     if (!doc) return;
-    const success = await copyTextToClipboard(JSON.stringify(doc, null, 2));
+    const success = await copyTextToClipboard(JSON.stringify(displayJson, null, 2));
     if (success) {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
@@ -85,10 +89,10 @@ export default function DocumentDetailView({ documentId, onBack }) {
 
   const handleDownloadJSON = () => {
     if (!doc) return;
-    const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(doc, null, 2));
+    const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(displayJson, null, 2));
     const dlAnchor = document.createElement('a');
     dlAnchor.setAttribute('href', dataStr);
-    dlAnchor.setAttribute('download', `${doc.source?.filename || 'document'}_normalized.json`);
+    dlAnchor.setAttribute('download', `${doc.source?.filename || 'document'}_structured.json`);
     dlAnchor.click();
   };
 
@@ -302,38 +306,40 @@ export default function DocumentDetailView({ documentId, onBack }) {
                   </div>
                 </div>
 
-                {content?.custom_fields?.grand_total && (
+                {(content?.custom_fields?.goods_and_tax_details?.total_amount_after_tax != null || content?.custom_fields?.grand_total != null) && (
                   <div style={{ padding: '12px 16px', background: 'var(--success-bg)', borderRadius: 8, border: '1px solid var(--success-border)' }}>
                     <div style={{ fontSize: '0.75rem', color: 'var(--success)', textTransform: 'uppercase' }}>Grand Total</div>
                     <div style={{ fontSize: '1.15rem', fontWeight: 700, color: 'var(--text-main)' }}>
-                      ₹{Number(content.custom_fields.grand_total).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                      ₹{Number(content.custom_fields?.goods_and_tax_details?.total_amount_after_tax ?? content.custom_fields?.grand_total).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
                     </div>
                   </div>
                 )}
 
-                {content?.custom_fields?.taxable_value && (
+                {(content?.custom_fields?.goods_and_tax_details?.subtotal != null || content?.custom_fields?.taxable_value != null) && (
                   <div style={{ padding: '12px 16px', background: 'var(--bg-subtle)', borderRadius: 8, border: '1px solid var(--border-subtle)' }}>
                     <div style={{ fontSize: '0.75rem', color: 'var(--text-dim)', textTransform: 'uppercase' }}>Taxable Value</div>
                     <div style={{ fontSize: '1.05rem', fontWeight: 700, color: 'var(--text-main)' }}>
-                      ₹{Number(content.custom_fields.taxable_value).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                      ₹{Number(content.custom_fields?.goods_and_tax_details?.subtotal ?? content.custom_fields?.taxable_value).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
                     </div>
                   </div>
                 )}
 
-                {(content?.custom_fields?.total_tax_amount || (content?.custom_fields?.cgst && content?.custom_fields?.sgst)) && (
+                {(content?.custom_fields?.goods_and_tax_details?.tax_details?.total_tax != null || content?.custom_fields?.total_tax_amount != null || (content?.custom_fields?.cgst && content?.custom_fields?.sgst)) && (
                   <div style={{ padding: '12px 16px', background: 'var(--bg-subtle)', borderRadius: 8, border: '1px solid var(--border-subtle)' }}>
                     <div style={{ fontSize: '0.75rem', color: 'var(--text-dim)', textTransform: 'uppercase' }}>Total Tax (GST)</div>
                     <div style={{ fontSize: '1.05rem', fontWeight: 700, color: 'var(--primary)' }}>
-                      ₹{Number(content.custom_fields.total_tax_amount || ((content.custom_fields.cgst || 0) + (content.custom_fields.sgst || 0))).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                      ₹{Number(content.custom_fields?.goods_and_tax_details?.tax_details?.total_tax ?? content.custom_fields?.total_tax_amount ?? ((content.custom_fields?.cgst || 0) + (content.custom_fields?.sgst || 0))).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
                     </div>
                   </div>
                 )}
 
-                {content?.custom_fields?.total_quantity && (
+                {(content?.custom_fields?.goods_and_tax_details?.total_quantity != null || content?.custom_fields?.total_quantity != null) && (
                   <div style={{ padding: '12px 16px', background: 'var(--bg-subtle)', borderRadius: 8, border: '1px solid var(--border-subtle)' }}>
                     <div style={{ fontSize: '0.75rem', color: 'var(--text-dim)', textTransform: 'uppercase' }}>Total Quantity</div>
                     <div style={{ fontSize: '1.05rem', fontWeight: 700, color: 'var(--text-main)' }}>
-                      {content.custom_fields.total_quantity}
+                      {content.custom_fields?.goods_and_tax_details?.total_quantity != null 
+                        ? `${content.custom_fields.goods_and_tax_details.total_quantity} ${content.custom_fields.goods_and_tax_details.quantity_unit || ''}`.trim()
+                        : content.custom_fields.total_quantity}
                     </div>
                   </div>
                 )}
@@ -409,7 +415,7 @@ export default function DocumentDetailView({ documentId, onBack }) {
               )}
 
               {/* Company Bank & Payment Details Card */}
-              {content?.custom_fields?.bank_details && (
+              {(content?.custom_fields?.our_bank_details || content?.custom_fields?.bank_details) && (
                 <div style={{ marginBottom: 28, padding: 18, background: 'var(--bg-subtle)', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-subtle)' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
                     <Landmark size={18} color="var(--primary)" />
@@ -422,7 +428,7 @@ export default function DocumentDetailView({ documentId, onBack }) {
                     <div style={{ padding: '10px 14px', background: 'var(--bg-card)', borderRadius: 6, border: '1px solid var(--border-subtle)' }}>
                       <div style={{ fontSize: '0.72rem', color: 'var(--text-dim)', fontWeight: 500 }}>Bank Name</div>
                       <div style={{ fontSize: '0.92rem', fontWeight: 600, color: 'var(--text-main)' }}>
-                        {content.custom_fields.bank_details.bank_name || '-'}
+                        {(content.custom_fields.our_bank_details?.bank_name || content.custom_fields.bank_details?.bank_name) || '-'}
                       </div>
                     </div>
 
@@ -430,13 +436,13 @@ export default function DocumentDetailView({ documentId, onBack }) {
                       <div>
                         <div style={{ fontSize: '0.72rem', color: 'var(--text-dim)', fontWeight: 500 }}>A/c No.</div>
                         <div style={{ fontSize: '0.95rem', fontWeight: 700, color: 'var(--primary)', letterSpacing: '0.5px' }}>
-                          {content.custom_fields.bank_details.account_number || '-'}
+                          {(content.custom_fields.our_bank_details?.account_number || content.custom_fields.bank_details?.account_number) || '-'}
                         </div>
                       </div>
                       <button 
                         className="btn btn-secondary" 
                         style={{ padding: '4px 8px', fontSize: '0.75rem' }}
-                        onClick={() => copyToClipboard(content.custom_fields.bank_details.account_number, 'acc')}
+                        onClick={() => copyToClipboard(content.custom_fields.our_bank_details?.account_number || content.custom_fields.bank_details?.account_number, 'acc')}
                       >
                         {copiedField === 'acc' ? <Check size={12} color="var(--success)" /> : <Copy size={12} />}
                       </button>
@@ -446,30 +452,30 @@ export default function DocumentDetailView({ documentId, onBack }) {
                       <div>
                         <div style={{ fontSize: '0.72rem', color: 'var(--text-dim)', fontWeight: 500 }}>Branch & IFS Code</div>
                         <div style={{ fontSize: '0.88rem', fontWeight: 600, color: 'var(--text-main)' }}>
-                          {content.custom_fields.bank_details.branch || '-'} & {content.custom_fields.bank_details.ifsc_code || '-'}
+                          {(content.custom_fields.our_bank_details?.branch || content.custom_fields.bank_details?.branch) || '-'} & {(content.custom_fields.our_bank_details?.ifsc_code || content.custom_fields.bank_details?.ifsc_code) || '-'}
                         </div>
                       </div>
                       <button 
                         className="btn btn-secondary" 
                         style={{ padding: '4px 8px', fontSize: '0.75rem' }}
-                        onClick={() => copyToClipboard(content.custom_fields.bank_details.ifsc_code, 'ifsc')}
+                        onClick={() => copyToClipboard(content.custom_fields.our_bank_details?.ifsc_code || content.custom_fields.bank_details?.ifsc_code, 'ifsc')}
                       >
                         {copiedField === 'ifsc' ? <Check size={12} color="var(--success)" /> : <Copy size={12} />}
                       </button>
                     </div>
 
-                    {content?.custom_fields?.company_pan && (
+                    {(content?.custom_fields?.contract_and_invoice_details?.seller_details?.pan || content?.custom_fields?.company_pan) && (
                       <div style={{ padding: '10px 14px', background: 'var(--bg-card)', borderRadius: 6, border: '1px solid var(--border-subtle)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                         <div>
                           <div style={{ fontSize: '0.72rem', color: 'var(--text-dim)', fontWeight: 500 }}>Company's PAN</div>
                           <div style={{ fontSize: '0.92rem', fontWeight: 700, color: 'var(--text-main)', letterSpacing: '0.5px' }}>
-                            {content.custom_fields.company_pan}
+                            {content.custom_fields.contract_and_invoice_details?.seller_details?.pan || content.custom_fields.company_pan}
                           </div>
                         </div>
                         <button 
                           className="btn btn-secondary" 
                           style={{ padding: '4px 8px', fontSize: '0.75rem' }}
-                          onClick={() => copyToClipboard(content.custom_fields.company_pan, 'pan')}
+                          onClick={() => copyToClipboard(content.custom_fields.contract_and_invoice_details?.seller_details?.pan || content.custom_fields.company_pan, 'pan')}
                         >
                           {copiedField === 'pan' ? <Check size={12} color="var(--success)" /> : <Copy size={12} />}
                         </button>
@@ -478,13 +484,13 @@ export default function DocumentDetailView({ documentId, onBack }) {
                   </div>
 
                   {/* Amounts in words */}
-                  {(content?.custom_fields?.amount_chargeable_in_words || content?.custom_fields?.tax_amount_in_words) && (
+                  {(content?.custom_fields?.amount_chargeable_in_words || content?.custom_fields?.tax_amount_in_words || content?.custom_fields?.goods_and_tax_details?.amount_in_words) && (
                     <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--border-subtle)', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 10 }}>
-                      {content.custom_fields.amount_chargeable_in_words && (
+                      {(content.custom_fields.amount_chargeable_in_words || content.custom_fields.goods_and_tax_details?.amount_in_words) && (
                         <div>
                           <div style={{ fontSize: '0.72rem', color: 'var(--text-dim)', fontWeight: 500 }}>Amount Chargeable (in words):</div>
                           <div style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-main)', marginTop: 2 }}>
-                            {content.custom_fields.amount_chargeable_in_words}
+                            {content.custom_fields.amount_chargeable_in_words || content.custom_fields.goods_and_tax_details?.amount_in_words}
                           </div>
                         </div>
                       )}
@@ -594,7 +600,7 @@ export default function DocumentDetailView({ documentId, onBack }) {
                 </button>
               </div>
               <div className="code-block" style={{ flex: 1, maxHeight: 580, overflowY: 'auto' }}>
-                {JSON.stringify(doc, null, 2)}
+                {JSON.stringify(displayJson, null, 2)}
               </div>
             </div>
           )}

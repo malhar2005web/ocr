@@ -37,7 +37,9 @@ class DocumentValidator:
                 })
             
             custom = content.get("custom_fields", {})
-            if "grand_total" not in custom and "total_amount" not in custom:
+            g_and_t = custom.get("goods_and_tax_details", {})
+            has_total = "grand_total" in custom or "total_amount" in custom or "total_amount_after_tax" in g_and_t
+            if not has_total:
                 issues.append({
                     "field": "content.custom_fields.grand_total",
                     "issue_type": "missing_total",
@@ -47,11 +49,13 @@ class DocumentValidator:
 
         # 3. Financial calculations check
         custom = content.get("custom_fields", {})
-        taxable = custom.get("taxable_value") or custom.get("assessable_value")
-        cgst = custom.get("cgst")
-        sgst = custom.get("sgst")
-        igst = custom.get("igst", 0)
-        grand_total = custom.get("grand_total")
+        g_and_t = custom.get("goods_and_tax_details", {})
+        tax_details = g_and_t.get("tax_details", {})
+        taxable = custom.get("taxable_value") or custom.get("assessable_value") or g_and_t.get("subtotal")
+        cgst = custom.get("cgst") or tax_details.get("cgst", {}).get("amount")
+        sgst = custom.get("sgst") or tax_details.get("sgst", {}).get("amount")
+        igst = custom.get("igst") or tax_details.get("igst", {}).get("amount") or 0
+        grand_total = custom.get("grand_total") or g_and_t.get("total_amount_after_tax")
 
         if taxable is not None and grand_total is not None:
             try:

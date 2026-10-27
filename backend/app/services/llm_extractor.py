@@ -223,6 +223,7 @@ class UniversalLLMExtractor:
 
         # 6. Extract Tables & Invoice Domain Intelligence
         tables = detected_tables.copy()
+        structured_invoice_data = None
         
         # If document is a Tax Invoice or commercial bill, run dedicated high-precision dynamic parser
         if doc_type in ["tax_invoice", "delivery_challan", "purchase_order", "bill_receipt"] or "invoice" in lower_text or "bill" in lower_text:
@@ -230,6 +231,16 @@ class UniversalLLMExtractor:
             tables = inv_tables
             custom_fields.update(inv_custom)
             kv_pairs.extend(inv_kv)
+            
+            # Build hierarchically structured invoice schema as requested
+            structured_invoice_data = self._build_structured_invoice_json(
+                raw_text=raw_text,
+                lines=lines,
+                goods_rows=tables[0].get("rows", []) if tables else [],
+                custom=custom_fields
+            )
+            # Use structured invoice as custom_fields
+            custom_fields = structured_invoice_data
         elif not tables:
             tabular_lines = [l for l in lines if "\t" in l or "  " in l]
             if len(tabular_lines) >= 3:
@@ -285,15 +296,13 @@ class UniversalLLMExtractor:
             if items_summary:
                 sections.append({"title": "Goods & Line Items Summary", "content": "\n".join(items_summary)})
 
-        if custom_fields.get("bank_details"):
-            bd = custom_fields["bank_details"]
+        bank_details_obj = None
+        if isinstance(custom_fields, dict):
+            bank_details_obj = custom_fields.get("our_bank_details") or custom_fields.get("bank_details")
+        if bank_details_obj:
+            bd = bank_details_obj
             bank_str = f"Bank Name: {bd.get('bank_name', '-')}\nAccount No: {bd.get('account_number', '-')}\nIFSC Code: {bd.get('ifsc_code', '-')}\nBranch: {bd.get('branch', '-')}"
-            if custom_fields.get("company_pan"):
-                bank_str += f"\nCompany PAN: {custom_fields['company_pan']}"
             sections.append({"title": "Bank & Payment Details", "content": bank_str})
-
-        if custom_fields.get("terms_and_conditions"):
-            sections.append({"title": "Terms & Conditions", "content": "\n".join(custom_fields["terms_and_conditions"])})
 
         return {
             "document_type": doc_type,
@@ -611,15 +620,6 @@ class UniversalLLMExtractor:
             custom["amount_chargeable_in_words"] = words_m.group(0).strip()
             extra_kv.append({"key": "Amount in Words", "value": custom["amount_chargeable_in_words"], "page": 1})
 
-        # Terms & Conditions
-        terms = []
-        term_matches = re.findall(r'(\d+[\.\)]\s*[A-Z][^\n]+)', raw_text)
-        for tm in term_matches:
-            if not any(k in tm.lower() for k in ["recovsrod", "overd ve mia"]):
-                terms.append(tm.strip())
-        if terms:
-            custom["terms_and_conditions"] = terms[:5]
-
         if "grand_total" in custom:
             extra_kv.append({"key": "Grand Total", "value": f"₹{custom['grand_total']:,.2f}", "page": 1})
         if "taxable_value" in custom:
@@ -642,5 +642,394 @@ class UniversalLLMExtractor:
             })
 
         return tables, custom, extra_kv
+
+    def _format_date_iso(self, date_str: Optional[str]) -> Optional[str]:
+        if not date_str:
+            return None
+        d = date_str.strip()
+        m = re.match(r'(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{2,4})', d)
+        if m:
+            day, month, year = m.group(1), m.group(2), m.group(3)
+            if len(year) == 2:
+                year = "20" + year
+            return f"{year}-{int(month):02d}-{int(day):02d}"
+        return d
+
+    def _build_structured_invoice_json(
+        self,
+        raw_text: str,
+        lines: List[str],
+        goods_rows: List[Dict[str, Any]],
+        custom: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Builds the clean, hierarchical invoice schema matching user requirements:
+        - contract_and_invoice_details (seller_details, contract_person_details, invoice_details)
+        - goods_and_tax_details (items, taxes, subtotal, total_amount_after_tax)
+        - our_bank_details (bank_name, branch, account_number, ifsc_code, account_holder_name)
+        Excludes raw Terms & Conditions (T&C).
+        """
+        # 1. Seller Details
+        seller_name = None
+        seller_m = re.search(r'For\s+M/S\.?\s*([A-Za-z0-9\s\.\&\-]+?)(?=\n|Authorised|Receiver|$)', raw_text, re.I)
+        if seller_m:
+            cand = seller_m.group(1).strip()
+            if len(cand) > 3:
+                seller_name = cand
+        if not seller_name:
+            for l in lines[:5]:
+                if any(k in l.upper() for k in ["ENTERPRISES", "SOLUTIONS", "CONCRETE", "INFRA", "PVT", "LTD"]):
+                    seller_name = l.strip()
+                    break
+
+        pans = list(set(re.findall(r'\b[A-Z]{5}\d{4}[A-Z]\b', raw_text)))
+        gstins = list(set(re.findall(r'\b\d{2}[A-Z]{5}\d{4}[A-Z\d]{1}[A-Z\d]{1}Z[A-Z\d]{1}\b', raw_text)))
+        
+        seller_pan = custom.get("company_pan") or (pans[0] if pans else None)
+        seller_gstin = None
+        if seller_pan and gstins:
+            for g in gstins:
+                if seller_pan in g:
+                    seller_gstin = g
+                    break
+        if not seller_gstin and gstins:
+            seller_gstin = gstins[0]
+
+        udyam_m = re.search(r'\b(UDYAM-[A-Z0-9\-]+|MH-\d{2}-\d+)\b', raw_text, re.I)
+        udyam_no = udyam_m.group(0).strip() if udyam_m else None
+        if udyam_no and not udyam_no.startswith("UDYAM-"):
+            udyam_no = f"UDYAM-{udyam_no}"
+
+        seller_state = "Maharashtra"
+        seller_state_code = "27"
+        state_m = re.search(r'(?:State\s*Name|Name\s*Of\s*State)\s*[:\-]\s*([A-Za-z]+)', raw_text, re.I)
+        if state_m:
+            seller_state = state_m.group(1).strip()
+        code_m = re.search(r'(?:Sate|State)\s*Code\s*[:\-]\s*(\d{2})', raw_text, re.I)
+        if code_m:
+            seller_state_code = code_m.group(1).strip()
+        elif seller_gstin:
+            seller_state_code = seller_gstin[:2]
+
+        seller_details = {
+            "business_name": seller_name or "-",
+            "gstin": seller_gstin,
+            "pan": seller_pan,
+            "udyam_number": udyam_no,
+            "state": seller_state,
+            "state_code": seller_state_code
+        }
+
+        # 2. Contract Person / Buyer Details
+        buyer_name = None
+        to_idx = None
+        for idx, l in enumerate(lines[:20]):
+            if l.strip().lower() in ["to,", "to"]:
+                to_idx = idx
+                break
+        if to_idx is not None:
+            for offset in [-2, -1, 1, 2, -3, 3]:
+                pos = to_idx + offset
+                if 0 <= pos < len(lines):
+                    candidate = lines[pos].strip()
+                    if len(candidate) > 3 and not any(k in candidate.lower() for k in ["invoice", "dated", "tax", "contact", "address", "gstin", "p/"]):
+                        if not re.match(r'^\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}$', candidate):
+                            buyer_name = candidate
+                            break
+        if not buyer_name:
+            buyer_m = re.search(r'(?:Buyer|Bill\s*to)\s*[:\-\s\n]*([A-Za-z0-9\s\.\&\-]+?)(?=\n|Plot|GSTIN|$)', raw_text, re.I)
+            if buyer_m:
+                buyer_name = buyer_m.group(1).strip()
+
+        contact_person = None
+        cp_m = re.search(r'Contact\s*Person\s*[:\-]\s*([^\n]+)', raw_text, re.I)
+        if cp_m:
+            contact_person = cp_m.group(1).strip()
+
+        contact_number = None
+        cn_m = re.search(r'(?:Contact\s*Number|Phone|Mobile|Mob\.?)\s*[:\-]?\s*(\d{10})', raw_text, re.I)
+        if cn_m:
+            contact_number = cn_m.group(1).strip()
+
+        buyer_address = None
+        addr_m = re.search(r'Address\s*[:\-]\s*([\s\S]+?)(?=\n\s*(?:MAHARASTRA|Maharashtra|GSTIN|PAN|Name\s*Of\s*State|Period|PO|$))', raw_text, re.I)
+        if addr_m:
+            addr_lines = [al.strip() for al in addr_m.group(1).split("\n") if al.strip()]
+            buyer_address = ", ".join(addr_lines)
+            if "MAHARASTRA" in raw_text or "Maharashtra" in raw_text:
+                if "maharashtra" not in buyer_address.lower():
+                    buyer_address += ", MAHARASHTRA"
+
+        buyer_gstin = None
+        buyer_gstin_m = re.search(r'GSTIN\s*(?:No\.?)?\s*[:\-]*\s*([0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z]Z[0-9A-Z])', raw_text, re.I)
+        if buyer_gstin_m:
+            cand = buyer_gstin_m.group(1).strip()
+            if cand != seller_gstin:
+                buyer_gstin = cand
+        if not buyer_gstin and len(gstins) > 1:
+            buyer_gstin = [g for g in gstins if g != seller_gstin][0]
+
+        buyer_pan = None
+        pan_buyer_m = re.search(r'PAN\s*No\s*[:\-]\s*([A-Z]{5}\d{4}[A-Z])', raw_text, re.I)
+        if pan_buyer_m and pan_buyer_m.group(1) != seller_pan:
+            buyer_pan = pan_buyer_m.group(1)
+        elif buyer_gstin and len(buyer_gstin) >= 12:
+            buyer_pan = buyer_gstin[2:12]
+
+        buyer_state = seller_state
+        buyer_state_code = seller_state_code
+        if buyer_gstin:
+            buyer_state_code = buyer_gstin[:2]
+
+        contract_person_details = {
+            "company_name": buyer_name or "-",
+            "contact_person": contact_person,
+            "contact_number": contact_number,
+            "address": buyer_address,
+            "gstin": buyer_gstin,
+            "pan": buyer_pan,
+            "state": buyer_state,
+            "state_code": buyer_state_code
+        }
+
+        # 3. Invoice Details
+        inv_type = "TAX INVOICE"
+        if "challan" in raw_text.lower():
+            inv_type = "DELIVERY CHALLAN"
+
+        inv_num = None
+        inv_num_m = re.search(r'\b([A-Za-z]{1,4}\/\d{4,8}(?:-\d{2,4})?)\b', raw_text)
+        if inv_num_m:
+            inv_num = inv_num_m.group(1).strip()
+        if not inv_num:
+            cand_m = re.search(r'Invoice\s*No\.?\s*[:\-\s\n]*([A-Za-z0-9\/\-]+)', raw_text, re.I)
+            if cand_m:
+                inv_num = cand_m.group(1).strip()
+
+        inv_date = None
+        dated_idx = None
+        for idx, l in enumerate(lines[:20]):
+            if any(k in l.strip().lower() for k in ["dated.", "dated", "invoice date"]):
+                dated_idx = idx
+                break
+        if dated_idx is not None:
+            for offset in [-4, -3, -2, -1, 1, 2]:
+                pos = dated_idx + offset
+                if 0 <= pos < len(lines):
+                    pm = re.match(r'^(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})$', lines[pos].strip())
+                    if pm:
+                        inv_date = self._format_date_iso(pm.group(1))
+                        break
+        if not inv_date:
+            d_m = re.search(r'(?:Dated\.?|Invoice\s*Date)\s*[:\-\s\n]*(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})', raw_text, re.I)
+            if d_m:
+                inv_date = self._format_date_iso(d_m.group(1))
+
+        # Period
+        period_start = inv_date
+        period_end = inv_date
+        period_idx = None
+        for idx, l in enumerate(lines[:30]):
+            if l.strip().lower() == "period":
+                period_idx = idx
+                break
+        if period_idx is not None:
+            period_dates = []
+            for offset in [-3, -2, -1, 1, 2, 3]:
+                pos = period_idx + offset
+                if 0 <= pos < len(lines):
+                    pm = re.match(r'^(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})$', lines[pos].strip())
+                    if pm:
+                        period_dates.append(self._format_date_iso(pm.group(1)))
+            if len(period_dates) >= 2:
+                period_start = period_dates[0]
+                period_end = period_dates[1]
+            elif len(period_dates) == 1:
+                period_start = period_dates[0]
+                period_end = period_dates[0]
+
+        # PO Number & PO Date
+        po_num = None
+        po_date = None
+        for idx, l in enumerate(lines[:35]):
+            if "po date" in l.lower():
+                if idx + 1 < len(lines) and re.match(r'^\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}$', lines[idx + 1].strip()):
+                    po_date = self._format_date_iso(lines[idx + 1].strip())
+            if "po no" in l.lower():
+                if idx + 1 < len(lines):
+                    val = lines[idx + 1].strip()
+                    if val and val not in [",", "-", ".", ":"]:
+                        po_num = val
+
+        site_name = None
+        site_m = re.search(r'Site\s*Address\s*\n\s*([^\n]+)', raw_text, re.I)
+        if site_m:
+            cand_site = site_m.group(1).strip()
+            if cand_site and not cand_site.lower().startswith("po") and not cand_site.lower().startswith("remarks"):
+                site_name = cand_site
+
+        pay_terms = None
+        pt_m = re.search(r'Terms\s*of\s*Payment\s*[:\-]\s*([^\n]+)', raw_text, re.I)
+        if pt_m:
+            pay_terms = pt_m.group(1).strip()
+
+        remarks = None
+        rem_m = re.search(r'Remarks\s*[:\-]\s*([^\n]+(?:\n[^\n]+)?)', raw_text, re.I)
+        if rem_m:
+            r_text = re.sub(r'\s+', ' ', rem_m.group(1).strip())
+            r_text = r_text.replace(":-", ":").replace("NBAME", "NAME")
+            remarks = r_text
+
+        invoice_details = {
+            "invoice_type": inv_type,
+            "invoice_number": inv_num or "-",
+            "invoice_date": inv_date,
+            "period": {
+                "start_date": period_start,
+                "end_date": period_end
+            },
+            "purchase_order_number": po_num,
+            "purchase_order_date": po_date,
+            "site_name": site_name,
+            "site_address": site_name,
+            "payment_terms": pay_terms,
+            "remarks": remarks
+        }
+
+        # 4. Goods and Tax Details
+        items = []
+        item_counter = 1
+        for r in goods_rows:
+            desc = r.get("Description of Goods") or r.get("Item") or ""
+            if desc.lower() in ["total", "cgst", "sgst", "igst"] or r.get("SI No") == "-":
+                continue
+            hsn = r.get("HSN/SAC") or r.get("HSN Code") or ""
+            qty_str = str(r.get("Quantity") or "0")
+            qty_val = 0.0
+            unit = "M3"
+            qm = re.search(r'([\d,]+(?:\.\d+)?)', qty_str)
+            if qm:
+                try:
+                    qty_val = float(qm.group(1).replace(",", ""))
+                except ValueError:
+                    pass
+            um = re.search(r'([A-Za-z0-9\.\/]+)$', qty_str)
+            if um:
+                unit = um.group(1).upper()
+            if r.get("Per") and r["Per"] != "-":
+                unit = r["Per"].upper()
+
+            rate_val = 0.0
+            try:
+                rate_val = float(str(r.get("Rate") or "0").replace(",", ""))
+            except ValueError:
+                pass
+
+            amt_val = 0.0
+            try:
+                amt_val = float(str(r.get("Amount") or "0").replace(",", ""))
+            except ValueError:
+                pass
+
+            items.append({
+                "serial_number": item_counter,
+                "description": desc,
+                "hsn_code": hsn if hsn != "-" else None,
+                "quantity": qty_val,
+                "unit": unit,
+                "unit_rate": rate_val,
+                "amount": amt_val
+            })
+            item_counter += 1
+
+        tot_qty_val = sum(it["quantity"] for it in items) if items else 0.0
+        tot_qty_unit = items[0]["unit"] if items else "M3"
+        subtotal_val = custom.get("taxable_value") or sum(it["amount"] for it in items)
+
+        cgst_pct = 9.0
+        if custom.get("cgst_rate"):
+            try:
+                cgst_pct = float(custom["cgst_rate"].replace("%", ""))
+            except ValueError:
+                pass
+        cgst_amt = custom.get("cgst", 0.0)
+
+        sgst_pct = 9.0
+        if custom.get("sgst_rate"):
+            try:
+                sgst_pct = float(custom["sgst_rate"].replace("%", ""))
+            except ValueError:
+                pass
+        sgst_amt = custom.get("sgst", 0.0)
+
+        tot_tax_val = custom.get("total_tax_amount") or (cgst_amt + sgst_amt)
+        grand_total_val = custom.get("grand_total") or (subtotal_val + tot_tax_val)
+
+        # Ack & IRN
+        ack_no = None
+        ack_dt = None
+        ack_m = re.search(r'AckNo"?\s*[:\-]?\s*"?(\d+)', raw_text, re.I)
+        if ack_m:
+            ack_no = ack_m.group(1).strip()
+        ack_dt_m = re.search(r'AckDt"?\s*[:\-]?\s*"?(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})', raw_text, re.I)
+        if ack_dt_m:
+            ack_dt = ack_dt_m.group(1).replace(" ", "T")
+
+        irn_val = None
+        irn_m = re.search(r'IRN\s*[:\-]?\s*([a-f0-9\s\n]{40,80})', raw_text, re.I)
+        if irn_m:
+            clean_irn = re.sub(r'[\s\n]+', '', irn_m.group(1))
+            if len(clean_irn) >= 40:
+                irn_val = clean_irn[:64]
+
+        amt_words = custom.get("amount_chargeable_in_words")
+        if not amt_words:
+            aw_m = re.search(r'Amount\s*in\s*words\s*[:\-]?\s*([A-Za-z\s]+(?:Only|only)\.?)', raw_text, re.I)
+            if aw_m:
+                amt_words = aw_m.group(1).strip()
+
+        goods_and_tax_details = {
+            "items": items,
+            "total_quantity": round(tot_qty_val, 2),
+            "quantity_unit": tot_qty_unit,
+            "subtotal": round(subtotal_val, 2),
+            "tax_details": {
+                "cgst": {
+                    "rate_percent": cgst_pct,
+                    "amount": cgst_amt
+                },
+                "sgst": {
+                    "rate_percent": sgst_pct,
+                    "amount": sgst_amt
+                },
+                "igst": None,
+                "total_tax": round(tot_tax_val, 2)
+            },
+            "total_amount_after_tax": round(grand_total_val, 2),
+            "amount_in_words": amt_words,
+            "acknowledgement_number": ack_no,
+            "acknowledgement_date": ack_dt,
+            "irn": irn_val
+        }
+
+        # 5. Bank Details
+        bd = custom.get("bank_details", {})
+        our_bank_details = {
+            "bank_name": bd.get("bank_name") or "-",
+            "branch": bd.get("branch") or "-",
+            "account_number": bd.get("account_number") or "-",
+            "ifsc_code": bd.get("ifsc_code") or "-",
+            "account_holder_name": seller_name or "-"
+        }
+
+        return {
+            "contract_and_invoice_details": {
+                "seller_details": seller_details,
+                "contract_person_details": contract_person_details,
+                "invoice_details": invoice_details
+            },
+            "goods_and_tax_details": goods_and_tax_details,
+            "our_bank_details": our_bank_details
+        }
 
 universal_llm_extractor = UniversalLLMExtractor()
