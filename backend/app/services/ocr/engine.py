@@ -70,24 +70,20 @@ class TesseractOCREngine(BaseOCREngine):
         return False
 
     def preprocess_image(self, image: Image.Image) -> Image.Image:
-        """Preprocesses image using OpenCV to improve OCR accuracy."""
+        """Preprocesses image using OpenCV to improve OCR accuracy without destructive noise."""
         try:
-            # Convert PIL to OpenCV format (BGR)
             np_img = np.array(image.convert("RGB"))
             gray = cv2.cvtColor(np_img, cv2.COLOR_RGB2GRAY)
 
-            # Resize if image resolution is too low
             height, width = gray.shape
-            if width < 1000:
-                scale = 1000 / width
+            # Upscale if width is smaller than optimal OCR resolution (1800px)
+            if width < 1800:
+                scale = 1800.0 / width
                 gray = cv2.resize(gray, (int(width * scale), int(height * scale)), interpolation=cv2.INTER_CUBIC)
 
-            # Denoise and adaptive thresholding
-            blurred = cv2.GaussianBlur(gray, (3, 3), 0)
-            thresholded = cv2.adaptiveThreshold(
-                blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
-            )
-            return Image.fromarray(thresholded)
+            # Gentle bilateral filter to preserve sharp character edges while removing JPEG compression artifacts
+            denoised = cv2.bilateralFilter(gray, 7, 50, 50)
+            return Image.fromarray(denoised)
         except Exception as e:
             logger.warning(f"OpenCV image preprocessing skipped: {e}")
             return image
@@ -101,6 +97,8 @@ class TesseractOCREngine(BaseOCREngine):
         
         import pytesseract
         processed = self.preprocess_image(image)
-        # PSM 3: Fully automatic page segmentation without OSD
-        text = pytesseract.image_to_string(processed, config="--psm 3")
+        # Use PSM 6 (uniform block of text) which preserves invoice table layout and avoids cross-column fragmentation
+        text = pytesseract.image_to_string(processed, config="--psm 6")
+        if len(text.strip()) < 50:
+            text = pytesseract.image_to_string(processed, config="--psm 3")
         return text.strip()

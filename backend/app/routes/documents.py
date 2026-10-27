@@ -9,6 +9,9 @@ from fastapi.responses import FileResponse, JSONResponse
 from app.core.config import settings
 from app.db.database import db
 from app.controllers.document_controller import document_controller
+from app.services.extractor import document_extractor
+from app.services.llm_extractor import universal_llm_extractor
+from app.services.validator import document_validator
 from app.schemas.document import (
     DocumentExtractResponse,
     DocumentStatusResponse,
@@ -90,6 +93,81 @@ async def get_document_json(document_id: str):
             }
         )
     return normalized
+
+@router.post("/{document_id}/reprocess")
+async def reprocess_document(document_id: str):
+    """Re-runs OCR extraction, table parsing, and LLM structuring on an existing uploaded file."""
+    doc = await db.get_document(document_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    
+    file_path = doc.get("file_path")
+    if not file_path or not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Stored document file not found on disk")
+    
+    # Run full updated extraction pipeline
+    extraction_result = document_extractor.extract_document(file_path, doc["filename"])
+    raw_text = extraction_result["raw_text"]
+    page_count = extraction_result["page_count"]
+    detected_tables = extraction_result["tables"]
+
+    extracted_data, llm_meta = await universal_llm_extractor.extract_structured_json(
+        raw_text=raw_text,
+        detected_tables=detected_tables,
+        filename=doc["filename"]
+    )
+
+    detected_type = extracted_data.get("document_type", "generic_document")
+    doc_metadata = extracted_data.get("metadata", {})
+    doc_content = extracted_data.get("content", {})
+
+    extraction_metadata = {
+        "pdf_method": extraction_result["pdf_method"],
+        "ocr_engine": extraction_result["ocr_engine"],
+        "llm_provider": llm_meta["llm_provider"],
+        "model": llm_meta["model"],
+        "extraction_mode": llm_meta["extraction_mode"],
+        "source_pages": extraction_result["source_pages"]
+    }
+
+    candidate_json = {
+        "document_id": document_id,
+        "schema_version": "1.0",
+        "document_type": detected_type,
+        "source": {
+            "filename": doc["filename"],
+            "file_type": doc.get("file_type", "jpeg"),
+            "page_count": page_count
+        },
+        "metadata": doc_metadata,
+        "content": doc_content,
+        "raw_text": raw_text,
+        "extraction_metadata": extraction_metadata,
+        "validation": {"status": "pending_review", "issues": []}
+    }
+
+    validation_res = document_validator.validate(candidate_json)
+    candidate_json["validation"] = validation_res
+
+    final_status = "completed"
+    if validation_res["status"] in ["review_needed", "calculation_mismatch"]:
+        final_status = "review_needed"
+
+    chunks = rag_service.chunk_document(raw_text, extraction_result["pages"])
+    candidate_json["_rag_chunks"] = chunks
+
+    doc.update({
+        "document_type": detected_type,
+        "status": final_status,
+        "page_count": page_count,
+        "raw_text": raw_text,
+        "normalized_json": candidate_json,
+        "metadata_json": doc_metadata,
+        "error_message": None
+    })
+    await db.save_document(doc)
+    await db.log_audit(document_id, "REPROCESSED", {"status": final_status, "document_type": detected_type})
+    return candidate_json
 
 @router.get("", response_model=DocumentListResponse)
 async def list_documents(

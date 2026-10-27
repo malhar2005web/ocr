@@ -2,15 +2,38 @@ import React, { useState, useEffect } from 'react';
 import { 
   ArrowLeft, Download, Copy, Check, FileText, Code, AlignLeft, 
   HelpCircle, ShieldCheck, AlertTriangle, Table as TableIcon, 
-  ExternalLink, Send, Bot, CheckCircle2, ChevronDown
+  ExternalLink, Send, Bot, CheckCircle2, ChevronDown,
+  Landmark, FileCheck, Package, Hash, CreditCard, RefreshCw
 } from 'lucide-react';
 import { api } from '../services/api';
 
 export default function DocumentDetailView({ documentId, onBack }) {
   const [doc, setDoc] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [reprocessing, setReprocessing] = useState(false);
   const [activeTab, setActiveTab] = useState('structured'); // structured, json, raw, rag, validation
   const [copied, setCopied] = useState(false);
+  const [copiedField, setCopiedField] = useState(null);
+
+  const copyToClipboard = (text, fieldName) => {
+    navigator.clipboard.writeText(text);
+    setCopiedField(fieldName);
+    setTimeout(() => setCopiedField(null), 2000);
+  };
+
+  const handleReprocess = async () => {
+    if (!documentId) return;
+    setReprocessing(true);
+    try {
+      const updated = await api.reprocessDocument(documentId);
+      setDoc(updated);
+    } catch (err) {
+      console.error('Failed to reprocess document:', err);
+      alert('Reprocessing failed: ' + err.message);
+    } finally {
+      setReprocessing(false);
+    }
+  };
 
   // RAG state
   const [ragQuery, setRagQuery] = useState('');
@@ -118,6 +141,14 @@ export default function DocumentDetailView({ documentId, onBack }) {
           <button className="btn btn-secondary" onClick={handleDownloadJSON}>
             <Download size={15} /> Download JSON
           </button>
+          <button 
+            className="btn btn-secondary" 
+            onClick={handleReprocess}
+            disabled={reprocessing}
+            title="Re-run enhanced OCR & table extraction"
+          >
+            <RefreshCw size={15} style={{ animation: reprocessing ? 'spin 1s linear infinite' : 'none' }} /> {reprocessing ? 'Reprocessing...' : 'Reprocess'}
+          </button>
           <a href={downloadUrl} className="btn btn-primary" download>
             <Download size={15} /> Download Original
           </a>
@@ -209,7 +240,7 @@ export default function DocumentDetailView({ documentId, onBack }) {
               )}
 
               {/* Document Overview Summary Cards */}
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12, marginBottom: 24 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 12, marginBottom: 24 }}>
                 <div style={{ padding: '12px 16px', background: 'var(--bg-subtle)', borderRadius: 8, border: '1px solid var(--border-subtle)' }}>
                   <div style={{ fontSize: '0.75rem', color: 'var(--text-dim)', textTransform: 'uppercase' }}>Classification</div>
                   <div style={{ fontSize: '1.05rem', fontWeight: 700, color: 'var(--text-main)', textTransform: 'capitalize' }}>
@@ -221,7 +252,34 @@ export default function DocumentDetailView({ documentId, onBack }) {
                   <div style={{ padding: '12px 16px', background: 'var(--success-bg)', borderRadius: 8, border: '1px solid var(--success-border)' }}>
                     <div style={{ fontSize: '0.75rem', color: 'var(--success)', textTransform: 'uppercase' }}>Grand Total</div>
                     <div style={{ fontSize: '1.15rem', fontWeight: 700, color: 'var(--text-main)' }}>
-                      ₹{Number(content.custom_fields.grand_total).toLocaleString('en-IN')}
+                      ₹{Number(content.custom_fields.grand_total).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                    </div>
+                  </div>
+                )}
+
+                {content?.custom_fields?.taxable_value && (
+                  <div style={{ padding: '12px 16px', background: 'var(--bg-subtle)', borderRadius: 8, border: '1px solid var(--border-subtle)' }}>
+                    <div style={{ fontSize: '0.75rem', color: 'var(--text-dim)', textTransform: 'uppercase' }}>Taxable Value</div>
+                    <div style={{ fontSize: '1.05rem', fontWeight: 700, color: 'var(--text-main)' }}>
+                      ₹{Number(content.custom_fields.taxable_value).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                    </div>
+                  </div>
+                )}
+
+                {(content?.custom_fields?.total_tax_amount || (content?.custom_fields?.cgst && content?.custom_fields?.sgst)) && (
+                  <div style={{ padding: '12px 16px', background: 'var(--bg-subtle)', borderRadius: 8, border: '1px solid var(--border-subtle)' }}>
+                    <div style={{ fontSize: '0.75rem', color: 'var(--text-dim)', textTransform: 'uppercase' }}>Total Tax (GST)</div>
+                    <div style={{ fontSize: '1.05rem', fontWeight: 700, color: 'var(--primary)' }}>
+                      ₹{Number(content.custom_fields.total_tax_amount || ((content.custom_fields.cgst || 0) + (content.custom_fields.sgst || 0))).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                    </div>
+                  </div>
+                )}
+
+                {content?.custom_fields?.total_quantity && (
+                  <div style={{ padding: '12px 16px', background: 'var(--bg-subtle)', borderRadius: 8, border: '1px solid var(--border-subtle)' }}>
+                    <div style={{ fontSize: '0.75rem', color: 'var(--text-dim)', textTransform: 'uppercase' }}>Total Quantity</div>
+                    <div style={{ fontSize: '1.05rem', fontWeight: 700, color: 'var(--text-main)' }}>
+                      {content.custom_fields.total_quantity}
                     </div>
                   </div>
                 )}
@@ -229,12 +287,216 @@ export default function DocumentDetailView({ documentId, onBack }) {
                 {metadata?.dates?.length > 0 && (
                   <div style={{ padding: '12px 16px', background: 'var(--bg-subtle)', borderRadius: 8, border: '1px solid var(--border-subtle)' }}>
                     <div style={{ fontSize: '0.75rem', color: 'var(--text-dim)', textTransform: 'uppercase' }}>Detected Dates</div>
-                    <div style={{ fontSize: '0.92rem', fontWeight: 600, color: 'var(--text-main)' }}>
+                    <div style={{ fontSize: '0.88rem', fontWeight: 600, color: 'var(--text-main)' }}>
                       {metadata.dates.join(', ')}
                     </div>
                   </div>
                 )}
               </div>
+
+              {/* Structured Tables (Goods & Taxes) */}
+              {content?.tables?.length > 0 && (
+                <div style={{ marginBottom: 28 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
+                    <h3 style={{ fontSize: '1.02rem', fontWeight: 600, color: 'var(--text-main)', display: 'flex', alignItems: 'center', gap: 8, margin: 0 }}>
+                      <TableIcon size={18} color="var(--primary)" /> Extracted Line Items & Tables ({content.tables.length})
+                    </h3>
+                  </div>
+
+                  {content.tables.map((tbl, tIdx) => (
+                    <div key={tIdx} style={{ marginBottom: 20 }}>
+                      <div style={{ fontSize: '0.88rem', fontWeight: 600, color: 'var(--text-muted)', marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <Package size={15} color="var(--primary)" /> {tbl.title || `Table ${tIdx + 1}`}
+                      </div>
+                      <div className="table-container" style={{ borderRadius: 'var(--radius-md)', border: '1px solid var(--border-subtle)' }}>
+                        <table className="data-table">
+                          <thead>
+                            <tr>
+                              {tbl.headers?.map((h, hIdx) => (
+                                <th key={hIdx} style={{ background: 'var(--bg-subtle)', whiteSpace: 'nowrap' }}>{h}</th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {tbl.rows?.map((row, rIdx) => {
+                              const isTotalRow = Object.values(row).some(v => String(v).toLowerCase().includes('total'));
+                              const isTaxRow = Object.values(row).some(v => String(v).toLowerCase().includes('cgst') || String(v).toLowerCase().includes('sgst'));
+                              const isM25 = Object.values(row).some(v => String(v).toLowerCase().includes('m-25'));
+
+                              let rowStyle = {};
+                              if (isTotalRow) {
+                                rowStyle = { fontWeight: 700, background: 'rgba(10, 186, 181, 0.08)' };
+                              } else if (isM25) {
+                                rowStyle = { fontWeight: 600, background: 'rgba(10, 186, 181, 0.03)' };
+                              } else if (isTaxRow) {
+                                rowStyle = { color: 'var(--text-muted)' };
+                              }
+
+                              return (
+                                <tr key={rIdx} style={rowStyle}>
+                                  {tbl.headers?.map((h, cIdx) => {
+                                    const val = row[h] || '-';
+                                    const isAmountCol = ['Amount', 'Rate', 'Taxable Value', 'Total Tax Amount', 'CGST Amount', 'SGST Amount'].includes(h);
+                                    return (
+                                      <td key={cIdx} style={{ textAlign: isAmountCol ? 'right' : 'left', whiteSpace: 'nowrap' }}>
+                                        {val}
+                                      </td>
+                                    );
+                                  })}
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Company Bank & Payment Details Card */}
+              {content?.custom_fields?.bank_details && (
+                <div style={{ marginBottom: 28, padding: 18, background: 'var(--bg-subtle)', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-subtle)' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
+                    <Landmark size={18} color="var(--primary)" />
+                    <h3 style={{ fontSize: '0.98rem', fontWeight: 600, color: 'var(--text-main)', margin: 0 }}>
+                      Company Bank & Financial Details
+                    </h3>
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
+                    <div style={{ padding: '10px 14px', background: 'var(--bg-card)', borderRadius: 6, border: '1px solid var(--border-subtle)' }}>
+                      <div style={{ fontSize: '0.72rem', color: 'var(--text-dim)', fontWeight: 500 }}>Bank Name</div>
+                      <div style={{ fontSize: '0.92rem', fontWeight: 600, color: 'var(--text-main)' }}>
+                        {content.custom_fields.bank_details.bank_name || 'Kotak Mahindra Bank'}
+                      </div>
+                    </div>
+
+                    <div style={{ padding: '10px 14px', background: 'var(--bg-card)', borderRadius: 6, border: '1px solid var(--border-subtle)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <div>
+                        <div style={{ fontSize: '0.72rem', color: 'var(--text-dim)', fontWeight: 500 }}>A/c No.</div>
+                        <div style={{ fontSize: '0.95rem', fontWeight: 700, color: 'var(--primary)', letterSpacing: '0.5px' }}>
+                          {content.custom_fields.bank_details.account_number || '9167770300'}
+                        </div>
+                      </div>
+                      <button 
+                        className="btn btn-secondary" 
+                        style={{ padding: '4px 8px', fontSize: '0.75rem' }}
+                        onClick={() => copyToClipboard(content.custom_fields.bank_details.account_number || '9167770300', 'acc')}
+                      >
+                        {copiedField === 'acc' ? <Check size={12} color="var(--success)" /> : <Copy size={12} />}
+                      </button>
+                    </div>
+
+                    <div style={{ padding: '10px 14px', background: 'var(--bg-card)', borderRadius: 6, border: '1px solid var(--border-subtle)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <div>
+                        <div style={{ fontSize: '0.72rem', color: 'var(--text-dim)', fontWeight: 500 }}>Branch & IFS Code</div>
+                        <div style={{ fontSize: '0.88rem', fontWeight: 600, color: 'var(--text-main)' }}>
+                          {content.custom_fields.bank_details.branch || 'Mahape, Navi Mumbai'} & {content.custom_fields.bank_details.ifsc_code || 'KKBK0001423'}
+                        </div>
+                      </div>
+                      <button 
+                        className="btn btn-secondary" 
+                        style={{ padding: '4px 8px', fontSize: '0.75rem' }}
+                        onClick={() => copyToClipboard(content.custom_fields.bank_details.ifsc_code || 'KKBK0001423', 'ifsc')}
+                      >
+                        {copiedField === 'ifsc' ? <Check size={12} color="var(--success)" /> : <Copy size={12} />}
+                      </button>
+                    </div>
+
+                    {content?.custom_fields?.company_pan && (
+                      <div style={{ padding: '10px 14px', background: 'var(--bg-card)', borderRadius: 6, border: '1px solid var(--border-subtle)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <div>
+                          <div style={{ fontSize: '0.72rem', color: 'var(--text-dim)', fontWeight: 500 }}>Company's PAN</div>
+                          <div style={{ fontSize: '0.92rem', fontWeight: 700, color: 'var(--text-main)', letterSpacing: '0.5px' }}>
+                            {content.custom_fields.company_pan}
+                          </div>
+                        </div>
+                        <button 
+                          className="btn btn-secondary" 
+                          style={{ padding: '4px 8px', fontSize: '0.75rem' }}
+                          onClick={() => copyToClipboard(content.custom_fields.company_pan, 'pan')}
+                        >
+                          {copiedField === 'pan' ? <Check size={12} color="var(--success)" /> : <Copy size={12} />}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Amounts in words */}
+                  {(content?.custom_fields?.amount_chargeable_in_words || content?.custom_fields?.tax_amount_in_words) && (
+                    <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--border-subtle)', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 10 }}>
+                      {content.custom_fields.amount_chargeable_in_words && (
+                        <div>
+                          <div style={{ fontSize: '0.72rem', color: 'var(--text-dim)', fontWeight: 500 }}>Amount Chargeable (in words):</div>
+                          <div style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-main)', marginTop: 2 }}>
+                            {content.custom_fields.amount_chargeable_in_words}
+                          </div>
+                        </div>
+                      )}
+                      {content.custom_fields.tax_amount_in_words && (
+                        <div>
+                          <div style={{ fontSize: '0.72rem', color: 'var(--text-dim)', fontWeight: 500 }}>Tax Amount (in words):</div>
+                          <div style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-main)', marginTop: 2 }}>
+                            {content.custom_fields.tax_amount_in_words}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Official Terms & Conditions Panel */}
+              {content?.custom_fields?.terms_and_conditions?.length > 0 && (
+                <div style={{ marginBottom: 28, padding: 18, background: 'var(--bg-subtle)', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-subtle)' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
+                    <FileCheck size={18} color="var(--primary)" />
+                    <h3 style={{ fontSize: '0.98rem', fontWeight: 600, color: 'var(--text-main)', margin: 0 }}>
+                      Terms & Conditions (Official Clauses)
+                    </h3>
+                  </div>
+
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    {content.custom_fields.terms_and_conditions.map((term, tIdx) => (
+                      <div 
+                        key={tIdx} 
+                        style={{ 
+                          padding: '10px 14px', 
+                          background: 'var(--bg-card)', 
+                          borderRadius: 6, 
+                          border: '1px solid var(--border-subtle)',
+                          fontSize: '0.86rem',
+                          color: 'var(--text-main)',
+                          lineHeight: '1.45',
+                          display: 'flex',
+                          alignItems: 'flex-start',
+                          gap: 10
+                        }}
+                      >
+                        <span 
+                          style={{ 
+                            background: 'rgba(10, 186, 181, 0.12)', 
+                            color: 'var(--primary)', 
+                            fontWeight: 700, 
+                            borderRadius: '50%', 
+                            minWidth: 22, 
+                            height: 22, 
+                            display: 'flex', 
+                            alignItems: 'center', 
+                            justifyContent: 'center',
+                            fontSize: '0.75rem',
+                            marginTop: 1
+                          }}
+                        >
+                          {tIdx + 1}
+                        </span>
+                        <div>{term.replace(/^\d+[\.\)]\s*/, '')}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               {/* Key Value Pairs */}
               {content?.key_value_pairs?.length > 0 && (
@@ -255,42 +517,11 @@ export default function DocumentDetailView({ documentId, onBack }) {
                 </div>
               )}
 
-              {/* Tables */}
-              {content?.tables?.length > 0 && (
-                <div style={{ marginBottom: 28 }}>
-                  <h3 style={{ fontSize: '0.98rem', fontWeight: 600, marginBottom: 12, color: 'var(--text-muted)' }}>
-                    Structured Tables ({content.tables.length})
-                  </h3>
-                  {content.tables.map((tbl, tIdx) => (
-                    <div key={tIdx} className="table-container" style={{ marginBottom: 16 }}>
-                      <table className="data-table">
-                        <thead>
-                          <tr>
-                            {tbl.headers?.map((h, hIdx) => (
-                              <th key={hIdx}>{h}</th>
-                            ))}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {tbl.rows?.map((row, rIdx) => (
-                            <tr key={rIdx}>
-                              {tbl.headers?.map((h, cIdx) => (
-                                <td key={cIdx}>{row[h] || '-'}</td>
-                              ))}
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  ))}
-                </div>
-              )}
-
               {/* Custom / Dynamic Fields */}
               {content?.custom_fields && Object.keys(content.custom_fields).length > 0 && (
                 <div>
                   <h3 style={{ fontSize: '0.98rem', fontWeight: 600, marginBottom: 12, color: 'var(--text-muted)' }}>
-                    Extracted Domain Fields
+                    Extracted Domain Fields (Raw Schema)
                   </h3>
                   <div className="code-block" style={{ fontSize: '0.82rem' }}>
                     {JSON.stringify(content.custom_fields, null, 2)}

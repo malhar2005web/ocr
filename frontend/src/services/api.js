@@ -77,5 +77,16 @@ export const api = {
       throw new Error(err.detail || err.message || 'RAG query failed');
     }
     return res.json();
+  },
+
+  async reprocessDocument(docId) {
+    const res = await fetch(`${API_BASE}/documents/${docId}/reprocess`, {
+      method: 'POST',
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || err.message || 'Reprocessing failed');
+    }
+    return res.json();
   }
 };
