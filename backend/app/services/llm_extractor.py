@@ -224,9 +224,9 @@ class UniversalLLMExtractor:
         # 6. Extract Tables & Invoice Domain Intelligence
         tables = detected_tables.copy()
         
-        # If document is a Tax Invoice, run dedicated high-precision parser for line items, taxes, bank details & terms
-        if doc_type == "tax_invoice" or "tax invoice" in lower_text or "m-25" in lower_text:
-            inv_tables, inv_custom, inv_kv = self._parse_invoice_structured_data(lines, raw_text)
+        # If document is a Tax Invoice or commercial bill, run dedicated high-precision dynamic parser
+        if doc_type in ["tax_invoice", "delivery_challan", "purchase_order", "bill_receipt"] or "invoice" in lower_text or "bill" in lower_text:
+            inv_tables, inv_custom, inv_kv = self._parse_invoice_structured_data(lines, raw_text, detected_tables)
             tables = inv_tables
             custom_fields.update(inv_custom)
             kv_pairs.extend(inv_kv)
@@ -266,70 +266,34 @@ class UniversalLLMExtractor:
                 if candidate:
                     addresses.append(candidate)
 
-        # 8. Paragraphs & Sections
-        if doc_type == "tax_invoice" or "tax invoice" in lower_text or "m-25" in lower_text:
-            clean_paragraphs = []
-            for p in raw_text.split("\n\n"):
-                p_str = p.strip()
-                if not p_str or len(p_str) < 15:
-                    continue
-                # Filter out garbled OCR lines where bank details and terms were horizontally fused
-                if any(w in p_str.lower() for w in ["recovsrod", "overd ve mia", "thadam of woes", "tight ta demand", "before dus dain", "computne gencraied"]):
-                    continue
-                clean_paragraphs.append(p_str)
+        # 8. Dynamic Paragraphs & Sections
+        paragraphs = [p.strip() for p in raw_text.split("\n\n") if len(p.strip()) > 20][:10]
 
-            clean_paragraphs.append(
-                "Terms & Conditions:\n"
-                "1. Interest Will Be Recovered @24% P.A. on Overdue unpaid bills.\n"
-                "2. Claim of any nature whatsoever will lapse unless raised in writing within 3 days from the date of invoice.\n"
-                "3. Goods once sold cannot be return and/or exchanged.\n"
-                "4. We reserved to ourselves the right to demand payment of this bill any time before due date."
-            )
-            clean_paragraphs.append(
-                "Company's Bank & Financial Details:\n"
-                "Bank Name: Kotak Mahindra Bank\n"
-                "A/c No.: 9167770300\n"
-                "Branch & IFS Code: Mahape, Navi Mumbai & KKBK0001423\n"
-                f"Company PAN: {custom_fields.get('company_pan', 'AAGFI9833D')}\n"
-                f"Amount Chargeable (in words): {custom_fields.get('amount_chargeable_in_words', 'INR Nineteen Thousand Four Hundred Seventy Only')}\n"
-                f"Tax Amount (in words): {custom_fields.get('tax_amount_in_words', 'INR Two Thousand Nine Hundred Seventy Only')}"
-            )
-            paragraphs = clean_paragraphs
+        sections = [
+            {"title": "Invoice Details & Parties", "content": "\n".join(lines[:14])}
+        ]
 
-            sections = [
-                {"title": "Invoice Details & Parties", "content": "\n".join(lines[:14])},
-                {
-                    "title": "Goods & Tax Breakdown Summary",
-                    "content": (
-                        "Line Item 1: M-25 | HSN/SAC: 38245010 | Qty: 3.000 CU.MT | Rate: 5,500.00 | Amount: 16,500.00\n"
-                        "CGST @ 9%: 1,485.00\n"
-                        "SGST @ 9%: 1,485.00\n"
-                        "Total Amount: ₹19,470.00"
-                    )
-                },
-                {
-                    "title": "Bank & Payment Details",
-                    "content": (
-                        "Bank Name: Kotak Mahindra Bank\n"
-                        "Account No: 9167770300\n"
-                        "IFSC Code: KKBK0001423\n"
-                        "Branch: Mahape, Navi Mumbai\n"
-                        f"Company PAN: {custom_fields.get('company_pan', 'AAGFI9833D')}"
-                    )
-                },
-                {
-                    "title": "Terms & Conditions",
-                    "content": (
-                        "1. Interest Will Be Recovered @24% P.A. on Overdue unpaid bills.\n"
-                        "2. Claim of any nature whatsoever will lapse unless raised in writing within 3 days from the date of invoice.\n"
-                        "3. Goods once sold cannot be return and/or exchanged.\n"
-                        "4. We reserved to ourselves the right to demand payment of this bill any time before due date."
-                    )
-                }
-            ]
-        else:
-            paragraphs = [p.strip() for p in raw_text.split("\n\n") if len(p.strip()) > 30][:10]
-            sections = [{"title": "General Content", "content": "\n".join(lines[:15])}]
+        if tables and tables[0].get("rows"):
+            items_summary = []
+            for r in tables[0]["rows"]:
+                desc = r.get("Description of Goods") or r.get("Description") or r.get("Item") or ""
+                amt = r.get("Amount") or ""
+                qty = r.get("Quantity") or ""
+                rate = r.get("Rate") or ""
+                if desc:
+                    items_summary.append(f"{desc} | Qty: {qty} | Rate: {rate} | Amount: {amt}".strip(" |"))
+            if items_summary:
+                sections.append({"title": "Goods & Line Items Summary", "content": "\n".join(items_summary)})
+
+        if custom_fields.get("bank_details"):
+            bd = custom_fields["bank_details"]
+            bank_str = f"Bank Name: {bd.get('bank_name', '-')}\nAccount No: {bd.get('account_number', '-')}\nIFSC Code: {bd.get('ifsc_code', '-')}\nBranch: {bd.get('branch', '-')}"
+            if custom_fields.get("company_pan"):
+                bank_str += f"\nCompany PAN: {custom_fields['company_pan']}"
+            sections.append({"title": "Bank & Payment Details", "content": bank_str})
+
+        if custom_fields.get("terms_and_conditions"):
+            sections.append({"title": "Terms & Conditions", "content": "\n".join(custom_fields["terms_and_conditions"])})
 
         return {
             "document_type": doc_type,
@@ -350,189 +314,252 @@ class UniversalLLMExtractor:
             }
         }
 
-    def _parse_invoice_structured_data(self, lines: List[str], raw_text: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any], List[Dict[str, Any]]]:
+    def _parse_invoice_structured_data(self, lines: List[str], raw_text: str, detected_tables: Optional[List[Dict[str, Any]]] = None) -> Tuple[List[Dict[str, Any]], Dict[str, Any], List[Dict[str, Any]]]:
         """
-        Specialized extractor for GST Tax Invoices.
-        Extracts:
-        - Goods & Line Items Table (M-25, Quantity, Rate, Amount, CGST, SGST, Total)
-        - HSN/SAC Tax Breakdown Table
-        - Bank Details, PAN, Tax Amount in Words, Total Amount in Words
-        - Clean Terms & Conditions (preventing corrupted OCR text)
+        Universal dynamic extractor for GST Tax Invoices and Commercial Bills.
+        Dynamically extracts whatever line items, taxes, totals, bank details,
+        PAN, and terms exist in the document without hardcoded values.
         """
         goods_rows = []
-        tax_rows = []
-        bank_details = {}
         custom: Dict[str, Any] = {}
         extra_kv = []
 
-        # 1. Parse Line Items (Goods description, HSN/SAC, Quantity, Rate, Amount)
-        for line in lines:
-            l_str = line.strip()
-            # Detect product row (e.g. M-25, ready mix concrete, goods)
-            if re.search(r'\b(m-?\d+|concrete|cement|ready\s*mix)\b', l_str, re.I) or "m-25" in l_str.lower():
-                hsn_m = re.search(r'\b(\d{6,8})\b', l_str)
-                qty_m = re.search(r'(\d+[\.,]\d{2,3})\s*(CU\.?MT|MT|NOS|KG|LTR|PCS)?', l_str, re.I)
-                amounts = re.findall(r'[\d,]+\.\d{2}', l_str)
-                
-                hsn = hsn_m.group(1) if hsn_m else "38245010"
-                qty = qty_m.group(0).strip().replace("/", "").replace("|", "") if qty_m else "3.000 CU.MT"
-                rate = amounts[0] if len(amounts) >= 2 else "5,500.00"
-                amount = amounts[-1] if amounts else "16,500.00"
-                
-                goods_rows.append({
-                    "SI No": "1",
-                    "Description of Goods": "M-25",
-                    "HSN/SAC": hsn,
-                    "Quantity": qty,
-                    "Rate": rate,
-                    "Per": "CU.MT",
-                    "Amount": amount
-                })
-            elif "cgst" in l_str.lower() and any(k in l_str for k in ["9%", "1,485", "1485"]):
-                cgst_amt_m = re.search(r'[\d,]+\.\d{2}', l_str)
-                goods_rows.append({
-                    "SI No": "-",
-                    "Description of Goods": "CGST @ 9%",
-                    "HSN/SAC": "-",
-                    "Quantity": "-",
-                    "Rate": "9%",
-                    "Per": "-",
-                    "Amount": cgst_amt_m.group(0) if cgst_amt_m else "1,485.00"
-                })
-            elif "sgst" in l_str.lower() and any(k in l_str for k in ["9%", "1,485", "1485"]):
-                sgst_amt_m = re.search(r'[\d,]+\.\d{2}', l_str)
-                goods_rows.append({
-                    "SI No": "-",
-                    "Description of Goods": "SGST @ 9%",
-                    "HSN/SAC": "-",
-                    "Quantity": "-",
-                    "Rate": "9%",
-                    "Per": "-",
-                    "Amount": sgst_amt_m.group(0) if sgst_amt_m else "1,485.00"
-                })
+        # 1. Use detected tables from PyMuPDF if valid tabular rows exist
+        if detected_tables:
+            for t in detected_tables:
+                headers = [str(h or "").lower() for h in t.get("headers", [])]
+                if any(k in " ".join(headers) for k in ["description", "item", "particulars", "hsn", "rate", "amount"]):
+                    for r in t.get("rows", []):
+                        clean_row = {k: v for k, v in r.items() if v and v != "None"}
+                        if clean_row:
+                            goods_rows.append(clean_row)
 
-        # Ensure line items exist
+        # 2. Extract line items from PyMuPDF vertical blocks
         if not goods_rows:
-            goods_rows.append({
-                "SI No": "1",
-                "Description of Goods": "M-25",
-                "HSN/SAC": "38245010",
-                "Quantity": "3.000 CU.MT",
-                "Rate": "5,500.00",
-                "Per": "CU.MT",
-                "Amount": "16,500.00"
-            })
+            item_pattern = re.compile(
+                r'(?:^|\n)\s*(\d{1,2})\s*\n\s*([\d,]+\.\d{2})\s*\n\s*([A-Za-z0-9\.\/]+)\s*\n\s*(\d+[\.,]\d{2,3})\s*\n\s*(\d{4,8})\s*\n\s*([\d,]+\.\d{2})\s*\n\s*([A-Za-z0-9\s\-\.\/\(\)]+?)(?=\n\s*\d{1,2}\s*\n|\n\s*Total|\n\s*[\d,]+\.\d{2}\s*\n\s*Total|\n\s*CGST|\n\s*AckNo|$)',
+                re.MULTILINE
+            )
+            for m in item_pattern.findall(raw_text):
+                goods_rows.append({
+                    "SI No": m[0],
+                    "Description of Goods": m[6].strip(),
+                    "HSN/SAC": m[4],
+                    "Quantity": f"{m[3]} {m[2]}".strip(),
+                    "Rate": m[1],
+                    "Per": m[2],
+                    "Amount": m[5]
+                })
+
+        # 3. Horizontal line items (Tesseract OCR / single lines)
+        if not goods_rows:
+            for line in lines:
+                m_item = re.search(r'^(\d{1,2})\s+([A-Za-z0-9\s\-\.\/\(\)]+?)\s+(\d{4,8})\s+(\d+[\.,]\d{2,3})\s*([A-Za-z0-9\.\/]+)?\s+([\d,]+\.?\d*)\s+([\d,]+\.?\d*)', line)
+                if m_item:
+                    goods_rows.append({
+                        "SI No": m_item.group(1),
+                        "Description of Goods": m_item.group(2).strip(),
+                        "HSN/SAC": m_item.group(3),
+                        "Quantity": f"{m_item.group(4)} {m_item.group(5) or ''}".strip(),
+                        "Rate": m_item.group(6),
+                        "Per": m_item.group(5) or "-",
+                        "Amount": m_item.group(7)
+                    })
+
+        # 4. Fallback product regex line detection (e.g. for noisy OCR scans)
+        if not goods_rows:
+            for line in lines:
+                if re.search(r'\b(M-?\d+|concrete|cement|charge|item|qty|goods)\b', line, re.I):
+                    hsn_m = re.search(r'\b(\d{6,8})\b', line)
+                    qty_m = re.search(r'(\d+[\.,]\d{2,3})\s*(CU\.?MT|MT|NOS|KG|LTR|PCS|M3)?', line, re.I)
+                    amounts = re.findall(r'[\d,]+\.\d{2}', line)
+                    desc_m = re.search(r'([A-Za-z0-9\s\-]{3,25})(?=\s+\d{6,8}|\s+\d+[\.,]\d{2,3})', line)
+                    
+                    desc = desc_m.group(1).strip() if desc_m else "Item"
+                    desc = re.sub(r'^\d+\s*', '', desc)
+                    if desc.lower() not in ["total", "cgst", "sgst", "igst"]:
+                        goods_rows.append({
+                            "SI No": str(len(goods_rows) + 1),
+                            "Description of Goods": desc,
+                            "HSN/SAC": hsn_m.group(1) if hsn_m else "-",
+                            "Quantity": qty_m.group(0).strip() if qty_m else "-",
+                            "Rate": amounts[0] if len(amounts) >= 2 else "-",
+                            "Per": qty_m.group(2) if (qty_m and qty_m.group(2)) else "-",
+                            "Amount": amounts[-1] if amounts else "-"
+                        })
+
+        # Dynamic Taxes (CGST, SGST, IGST)
+        cgst_rate_m = re.search(r'(\d+(?:\.\d+)?%)\s*(?:\n|\s)*CGST|CGST\s*(?:@\s*)?(\d+(?:\.\d+)?%)', raw_text, re.I)
+        cgst_rate = (cgst_rate_m.group(1) or cgst_rate_m.group(2)) if cgst_rate_m else "9%"
+        cgst_amt_m = re.search(r'CGST\s*[\n\r\s]*[:\s₹Rs\.]*([\d,]+\.\d{2})', raw_text, re.I)
+        if cgst_amt_m:
+            val = float(cgst_amt_m.group(1).replace(",", ""))
+            custom["cgst"] = val
+            custom["cgst_amount"] = val
+            custom["cgst_rate"] = cgst_rate
             goods_rows.append({
                 "SI No": "-",
-                "Description of Goods": "CGST @ 9%",
+                "Description of Goods": f"CGST @ {cgst_rate}",
                 "HSN/SAC": "-",
                 "Quantity": "-",
-                "Rate": "9%",
+                "Rate": cgst_rate,
                 "Per": "-",
-                "Amount": "1,485.00"
+                "Amount": f"{val:,.2f}"
             })
+
+        sgst_rate_m = re.search(r'(\d+(?:\.\d+)?%)\s*(?:\n|\s)*SGST|SGST\s*(?:@\s*)?(\d+(?:\.\d+)?%)', raw_text, re.I)
+        sgst_rate = (sgst_rate_m.group(1) or sgst_rate_m.group(2)) if sgst_rate_m else "9%"
+        sgst_amt_m = re.search(r'SGST\s*(?:9\.00%\s*)?[\n\r\s]*[:\s₹Rs\.]*([\d,]+\.\d{2})', raw_text, re.I)
+        if sgst_amt_m:
+            val = float(sgst_amt_m.group(1).replace(",", ""))
+            custom["sgst"] = val
+            custom["sgst_amount"] = val
+            custom["sgst_rate"] = sgst_rate
             goods_rows.append({
                 "SI No": "-",
-                "Description of Goods": "SGST @ 9%",
+                "Description of Goods": f"SGST @ {sgst_rate}",
                 "HSN/SAC": "-",
                 "Quantity": "-",
-                "Rate": "9%",
+                "Rate": sgst_rate,
                 "Per": "-",
-                "Amount": "1,485.00"
+                "Amount": f"{val:,.2f}"
             })
 
-        goods_rows.append({
-            "SI No": "-",
-            "Description of Goods": "Total",
-            "HSN/SAC": "-",
-            "Quantity": "3.000 CU.MT",
-            "Rate": "-",
-            "Per": "-",
-            "Amount": "19,470.00"
-        })
+        # Dynamic Financial Totals
+        gt_m = re.search(r'(?:Total\s*Amount|Grand\s*Total|Total\s*Payable|Net\s*Amount)\s*[:\-\s₹Rs\.]*([\d,]+\.\d{2})', raw_text, re.I)
+        if not gt_m:
+            gt_m = re.search(r'([\d,]+\.\d{2})\s*\n\s*(?:Total\s*Amount|Grand\s*Total|Net\s*Amount)', raw_text, re.I)
+        
+        taxable_m = re.search(r'(?:Taxable\s*Value|Assessable\s*Value)\s*[:\-\s₹Rs\.]*([\d,]+\.\d{2})', raw_text, re.I)
+        if not taxable_m:
+            taxable_m = re.search(r'([\d,]+\.\d{2})\s*\n\s*[\d\.]+\s*\n\s*[A-Za-z0-9\.]+\s*\n\s*Total', raw_text, re.I)
+            if not taxable_m:
+                taxable_m = re.search(r'Total\s*[:\-\s₹Rs\.]*([\d,]+\.\d{2})', raw_text, re.I)
 
-        # 2. Tax Breakdown Table (HSN/SAC)
-        tax_rows.append({
-            "HSN/SAC": "38245010",
-            "Taxable Value": "16,500.00",
-            "CGST Rate": "9%",
-            "CGST Amount": "1,485.00",
-            "SGST Rate": "9%",
-            "SGST Amount": "1,485.00",
-            "Total Tax Amount": "2,970.00"
-        })
+        if gt_m:
+            custom["grand_total"] = float(gt_m.group(1).replace(",", ""))
+        elif "cgst" in custom and "sgst" in custom and taxable_m:
+            custom["grand_total"] = float(taxable_m.group(1).replace(",", "")) + custom["cgst"] + custom["sgst"]
 
-        # 3. Bank Details & PAN
-        for line in lines:
-            l_str = line.strip()
-            if any(k in l_str.lower() for k in ["kotak", "bank name"]):
-                bank_m = re.search(r'([A-Za-z\s]+(?:Bank|Mahindra Bank))', l_str, re.I)
-                bank_details["bank_name"] = bank_m.group(1).strip() if bank_m else "Kotak Mahindra Bank"
-            if any(k in l_str.lower() for k in ["alc no", "a/c no", "account no", "9167770300"]):
-                ac_m = re.search(r'\b\d{9,16}\b', l_str)
-                if ac_m:
-                    bank_details["account_number"] = ac_m.group(0)
-            if any(k in l_str.lower() for k in ["ifs", "kkbk"]):
-                ifsc_m = re.search(r'[A-Z]{4}0[A-Z0-9]{6}', l_str)
-                bank_details["ifsc_code"] = ifsc_m.group(0) if ifsc_m else "KKBK0001423"
-                bank_details["branch"] = "Mahape, Navi Mumbai"
-            if "pan" in l_str.lower():
-                pan_m = re.search(r'\b[A-Z]{5}\d{4}[A-Z]\b', l_str)
-                if pan_m:
-                    custom["company_pan"] = pan_m.group(0)
+        if taxable_m:
+            custom["taxable_value"] = float(taxable_m.group(1).replace(",", ""))
+        elif "grand_total" in custom and "cgst" in custom and "sgst" in custom:
+            custom["taxable_value"] = custom["grand_total"] - (custom["cgst"] + custom["sgst"])
 
-            # Amount in words
-            if "nineteen thousand four hundred seventy" in l_str.lower():
-                custom["amount_chargeable_in_words"] = "INR Nineteen Thousand Four Hundred Seventy Only"
-            if "two thousand nine hundred seventy" in l_str.lower():
-                custom["tax_amount_in_words"] = "INR Two Thousand Nine Hundred Seventy Only"
+        if "cgst" in custom and "sgst" in custom:
+            custom["total_tax_amount"] = custom["cgst"] + custom["sgst"]
 
-        # Defaults if low OCR quality
-        if not bank_details.get("bank_name"):
-            bank_details["bank_name"] = "Kotak Mahindra Bank"
-        if not bank_details.get("account_number"):
-            bank_details["account_number"] = "9167770300"
-        if not bank_details.get("ifsc_code"):
-            bank_details["ifsc_code"] = "KKBK0001423"
-        if not bank_details.get("branch"):
-            bank_details["branch"] = "Mahape, Navi Mumbai"
-        if not custom.get("company_pan"):
-            custom["company_pan"] = "AAGFI9833D"
-        if not custom.get("amount_chargeable_in_words"):
-            custom["amount_chargeable_in_words"] = "INR Nineteen Thousand Four Hundred Seventy Only"
-        if not custom.get("tax_amount_in_words"):
-            custom["tax_amount_in_words"] = "INR Two Thousand Nine Hundred Seventy Only"
+        # Dynamic Total Quantity
+        qty_m = re.search(r'(\d+[\.,]\d{2,3})\s*([A-Za-z0-9\.\/]+)\s*\n\s*Total', raw_text, re.I)
+        if not qty_m:
+            qty_m = re.search(r'Total\s+(\d+[\.,]\d{2,3}\s*[A-Za-z0-9\.\/]*)', raw_text, re.I)
+        
+        if qty_m:
+            custom["total_quantity"] = f"{qty_m.group(1)} {qty_m.group(2)}".strip() if qty_m.lastindex >= 2 else qty_m.group(1).strip()
+        elif goods_rows:
+            custom["total_quantity"] = goods_rows[0].get("Quantity", "-")
 
-        # Clean Terms & Conditions (never corrupt OCR gibberish)
-        terms = [
-            "1. Interest Will Be Recovered @24% P.A. on Overdue unpaid bills.",
-            "2. Claim of any nature whatsoever will lapse unless raised in writing within 3 days from the date of invoice.",
-            "3. Goods once sold cannot be return and/or exchanged.",
-            "4. We reserved to ourselves the right to demand payment of this bill any time before due date."
-        ]
+        # Add Total row to goods_rows
+        if "grand_total" in custom:
+            goods_rows.append({
+                "SI No": "-",
+                "Description of Goods": "Total",
+                "HSN/SAC": "-",
+                "Quantity": custom.get("total_quantity", "-"),
+                "Rate": "-",
+                "Per": "-",
+                "Amount": f"{custom['grand_total']:,.2f}"
+            })
 
-        custom["bank_details"] = bank_details
-        custom["terms_and_conditions"] = terms
-        custom["grand_total"] = 19470.00
-        custom["taxable_value"] = 16500.00
-        custom["cgst"] = 1485.00
-        custom["sgst"] = 1485.00
-        custom["cgst_amount"] = 1485.00
-        custom["sgst_amount"] = 1485.00
-        custom["total_tax_amount"] = 2970.00
-        custom["total_quantity"] = "3.000 CU.MT"
+        # Dynamic Tax Breakdown Table
+        tax_rows = []
+        unique_hsns = list(set([r.get("HSN/SAC") for r in goods_rows if r.get("HSN/SAC") and r.get("HSN/SAC") != "-"]))
+        hsn_val = unique_hsns[0] if unique_hsns else "HSN"
+        if "taxable_value" in custom:
+            tax_rows.append({
+                "HSN/SAC": hsn_val,
+                "Taxable Value": f"{custom['taxable_value']:,.2f}",
+                "CGST Rate": custom.get("cgst_rate", "9%"),
+                "CGST Amount": f"{custom.get('cgst', 0.0):,.2f}",
+                "SGST Rate": custom.get("sgst_rate", "9%"),
+                "SGST Amount": f"{custom.get('sgst', 0.0):,.2f}",
+                "Total Tax Amount": f"{custom.get('total_tax_amount', 0.0):,.2f}"
+            })
 
-        # Add explicit key-values
-        extra_kv.extend([
-            {"key": "Company PAN", "value": custom["company_pan"], "page": 1},
-            {"key": "Bank Name", "value": bank_details["bank_name"], "page": 1},
-            {"key": "Bank A/c No", "value": bank_details["account_number"], "page": 1},
-            {"key": "Bank IFSC Code", "value": bank_details["ifsc_code"], "page": 1},
-            {"key": "Amount in Words", "value": custom["amount_chargeable_in_words"], "page": 1},
-            {"key": "Tax in Words", "value": custom["tax_amount_in_words"], "page": 1},
-            {"key": "Grand Total", "value": "₹19,470.00", "page": 1},
-            {"key": "Taxable Value", "value": "₹16,500.00", "page": 1}
-        ])
+        # Dynamic PAN and GSTIN
+        pans = list(set(re.findall(r'\b[A-Z]{5}\d{4}[A-Z]\b', raw_text)))
+        gstins = list(set(re.findall(r'\b\d{2}[A-Z]{5}\d{4}[A-Z\d]{1}[A-Z\d]{1}Z[A-Z\d]{1}\b', raw_text)))
+        if pans:
+            custom["company_pan"] = pans[0]
+            extra_kv.append({"key": "Company PAN", "value": pans[0], "page": 1})
+        if gstins:
+            custom["supplier_gstin"] = gstins[0]
+            extra_kv.append({"key": "Supplier GSTIN", "value": gstins[0], "page": 1})
+            if len(gstins) > 1:
+                custom["client_gstin"] = gstins[1]
+                extra_kv.append({"key": "Client GSTIN", "value": gstins[1], "page": 1})
+
+        # Dynamic Bank Details
+        bank_name = None
+        acc_no = None
+        ifsc = None
+        branch = None
+
+        ifsc_m = re.search(r'\b([A-Z]{4}0[A-Z0-9]{6})\b', raw_text)
+        if ifsc_m:
+            ifsc = ifsc_m.group(1)
+
+        bank_colon_m = re.search(r':\s*([A-Za-z\s]+(?:BANK|Bank))\s*\n\s*:\s*([A-Za-z0-9\s\(\)\-]+?)\s*\n\s*:\s*(\d{9,18})', raw_text)
+        if bank_colon_m:
+            bank_name = bank_colon_m.group(1).strip()
+            branch = bank_colon_m.group(2).strip()
+            acc_no = bank_colon_m.group(3).strip()
+        else:
+            b_name_m = re.search(r'(?:Bank\s*Name|Bank)\s*[:\-]\s*([A-Za-z\s]+(?:Bank|Mahindra Bank))', raw_text, re.I)
+            if b_name_m:
+                bank_name = b_name_m.group(1).strip()
+            
+            b_acc_m = re.search(r'(?:A/c\s*(?:No\.?)?|Account\s*No\.?)\s*[:\-]?\s*(\d{9,18})', raw_text, re.I)
+            if b_acc_m:
+                acc_no = b_acc_m.group(1).strip()
+                
+            b_branch_m = re.search(r'(?:Branch|Branch\s*&\s*IFS\s*Code)\s*[:\-]\s*([^,\n]+(?:,\s*[^,\n]+)?)', raw_text, re.I)
+            if b_branch_m:
+                branch = b_branch_m.group(1).strip()
+
+        if acc_no or ifsc or bank_name:
+            custom["bank_details"] = {
+                "bank_name": bank_name or "-",
+                "account_number": acc_no or "-",
+                "ifsc_code": ifsc or "-",
+                "branch": branch or "-"
+            }
+            if bank_name:
+                extra_kv.append({"key": "Bank Name", "value": bank_name, "page": 1})
+            if acc_no:
+                extra_kv.append({"key": "Bank A/c No", "value": acc_no, "page": 1})
+            if ifsc:
+                extra_kv.append({"key": "Bank IFSC Code", "value": ifsc, "page": 1})
+
+        # Amount in words
+        words_m = re.search(r'(?:Amount\s*in\s*words|Rupees|INR)\s*[:\-]?\s*([A-Za-z\s]+(?:Only|only)\.?)', raw_text, re.I)
+        if words_m:
+            custom["amount_chargeable_in_words"] = words_m.group(0).strip()
+            extra_kv.append({"key": "Amount in Words", "value": custom["amount_chargeable_in_words"], "page": 1})
+
+        # Terms & Conditions
+        terms = []
+        term_matches = re.findall(r'(\d+[\.\)]\s*[A-Z][^\n]+)', raw_text)
+        for tm in term_matches:
+            if not any(k in tm.lower() for k in ["recovsrod", "overd ve mia"]):
+                terms.append(tm.strip())
+        if terms:
+            custom["terms_and_conditions"] = terms[:5]
+
+        if "grand_total" in custom:
+            extra_kv.append({"key": "Grand Total", "value": f"₹{custom['grand_total']:,.2f}", "page": 1})
+        if "taxable_value" in custom:
+            extra_kv.append({"key": "Taxable Value", "value": f"₹{custom['taxable_value']:,.2f}", "page": 1})
 
         tables = [
             {
@@ -540,14 +567,15 @@ class UniversalLLMExtractor:
                 "page": 1,
                 "headers": ["SI No", "Description of Goods", "HSN/SAC", "Quantity", "Rate", "Per", "Amount"],
                 "rows": goods_rows
-            },
-            {
+            }
+        ]
+        if tax_rows:
+            tables.append({
                 "title": "Tax Breakdown (HSN/SAC)",
                 "page": 1,
                 "headers": ["HSN/SAC", "Taxable Value", "CGST Rate", "CGST Amount", "SGST Rate", "SGST Amount", "Total Tax Amount"],
                 "rows": tax_rows
-            }
-        ]
+            })
 
         return tables, custom, extra_kv
 
