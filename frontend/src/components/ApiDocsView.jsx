@@ -1,13 +1,16 @@
 import React, { useState } from 'react';
 import { ExternalLink, Copy, Check, Terminal, Code2 } from 'lucide-react';
+import { copyTextToClipboard } from '../services/clipboard';
 
 export default function ApiDocsView() {
   const [copiedKey, setCopiedKey] = useState(null);
 
-  const copyCode = (key, text) => {
-    navigator.clipboard.writeText(text);
-    setCopiedKey(key);
-    setTimeout(() => setCopiedKey(null), 2000);
+  const copyCode = async (key, text) => {
+    const success = await copyTextToClipboard(text);
+    if (success) {
+      setCopiedKey(key);
+      setTimeout(() => setCopiedKey(null), 2000);
+    }
   };
 
   const endpoints = [

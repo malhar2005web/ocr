@@ -6,6 +6,7 @@ import {
   Landmark, FileCheck, Package, Hash, CreditCard, RefreshCw
 } from 'lucide-react';
 import { api } from '../services/api';
+import { copyTextToClipboard } from '../services/clipboard';
 
 export default function DocumentDetailView({ documentId, onBack }) {
   const [doc, setDoc] = useState(null);
@@ -16,10 +17,13 @@ export default function DocumentDetailView({ documentId, onBack }) {
   const [copied, setCopied] = useState(false);
   const [copiedField, setCopiedField] = useState(null);
 
-  const copyToClipboard = (text, fieldName) => {
-    navigator.clipboard.writeText(text);
-    setCopiedField(fieldName);
-    setTimeout(() => setCopiedField(null), 2000);
+  const copyToClipboard = async (text, fieldName) => {
+    if (!text) return;
+    const success = await copyTextToClipboard(text);
+    if (success) {
+      setCopiedField(fieldName);
+      setTimeout(() => setCopiedField(null), 2000);
+    }
   };
 
   const handleReprocess = async () => {
@@ -70,11 +74,13 @@ export default function DocumentDetailView({ documentId, onBack }) {
     loadDoc();
   }, [documentId]);
 
-  const handleCopyJSON = () => {
+  const handleCopyJSON = async () => {
     if (!doc) return;
-    navigator.clipboard.writeText(JSON.stringify(doc, null, 2));
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    const success = await copyTextToClipboard(JSON.stringify(doc, null, 2));
+    if (success) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
   };
 
   const handleDownloadJSON = () => {
@@ -416,7 +422,7 @@ export default function DocumentDetailView({ documentId, onBack }) {
                     <div style={{ padding: '10px 14px', background: 'var(--bg-card)', borderRadius: 6, border: '1px solid var(--border-subtle)' }}>
                       <div style={{ fontSize: '0.72rem', color: 'var(--text-dim)', fontWeight: 500 }}>Bank Name</div>
                       <div style={{ fontSize: '0.92rem', fontWeight: 600, color: 'var(--text-main)' }}>
-                        {content.custom_fields.bank_details.bank_name || 'Kotak Mahindra Bank'}
+                        {content.custom_fields.bank_details.bank_name || '-'}
                       </div>
                     </div>
 
@@ -424,13 +430,13 @@ export default function DocumentDetailView({ documentId, onBack }) {
                       <div>
                         <div style={{ fontSize: '0.72rem', color: 'var(--text-dim)', fontWeight: 500 }}>A/c No.</div>
                         <div style={{ fontSize: '0.95rem', fontWeight: 700, color: 'var(--primary)', letterSpacing: '0.5px' }}>
-                          {content.custom_fields.bank_details.account_number || '9167770300'}
+                          {content.custom_fields.bank_details.account_number || '-'}
                         </div>
                       </div>
                       <button 
                         className="btn btn-secondary" 
                         style={{ padding: '4px 8px', fontSize: '0.75rem' }}
-                        onClick={() => copyToClipboard(content.custom_fields.bank_details.account_number || '9167770300', 'acc')}
+                        onClick={() => copyToClipboard(content.custom_fields.bank_details.account_number, 'acc')}
                       >
                         {copiedField === 'acc' ? <Check size={12} color="var(--success)" /> : <Copy size={12} />}
                       </button>
@@ -440,13 +446,13 @@ export default function DocumentDetailView({ documentId, onBack }) {
                       <div>
                         <div style={{ fontSize: '0.72rem', color: 'var(--text-dim)', fontWeight: 500 }}>Branch & IFS Code</div>
                         <div style={{ fontSize: '0.88rem', fontWeight: 600, color: 'var(--text-main)' }}>
-                          {content.custom_fields.bank_details.branch || 'Mahape, Navi Mumbai'} & {content.custom_fields.bank_details.ifsc_code || 'KKBK0001423'}
+                          {content.custom_fields.bank_details.branch || '-'} & {content.custom_fields.bank_details.ifsc_code || '-'}
                         </div>
                       </div>
                       <button 
                         className="btn btn-secondary" 
                         style={{ padding: '4px 8px', fontSize: '0.75rem' }}
-                        onClick={() => copyToClipboard(content.custom_fields.bank_details.ifsc_code || 'KKBK0001423', 'ifsc')}
+                        onClick={() => copyToClipboard(content.custom_fields.bank_details.ifsc_code, 'ifsc')}
                       >
                         {copiedField === 'ifsc' ? <Check size={12} color="var(--success)" /> : <Copy size={12} />}
                       </button>
