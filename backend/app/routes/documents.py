@@ -169,6 +169,24 @@ async def reprocess_document(document_id: str):
     await db.log_audit(document_id, "REPROCESSED", {"status": final_status, "document_type": detected_type})
     return candidate_json
 
+@router.post("/{document_id}/approve")
+async def approve_document(document_id: str):
+    """Manually approves a document under review, resolving warnings and setting status to completed."""
+    doc = await db.get_document(document_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    
+    doc["status"] = "completed"
+    if doc.get("normalized_json"):
+        if "validation" not in doc["normalized_json"]:
+            doc["normalized_json"]["validation"] = {}
+        doc["normalized_json"]["validation"]["status"] = "completed"
+        doc["normalized_json"]["validation"]["issues"] = []
+    
+    await db.save_document(doc)
+    await db.log_audit(document_id, "MANUAL_APPROVAL", {"status": "completed"})
+    return doc.get("normalized_json") or {"status": "completed", "document_id": document_id}
+
 @router.get("", response_model=DocumentListResponse)
 async def list_documents(
     documentType: Optional[str] = Query(None, description="Filter by document type (tax_invoice, delivery_challan, etc.)"),

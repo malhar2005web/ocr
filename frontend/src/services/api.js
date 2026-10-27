@@ -88,5 +88,16 @@ export const api = {
       throw new Error(err.detail || err.message || 'Reprocessing failed');
     }
     return res.json();
+  },
+
+  async approveDocument(docId) {
+    const res = await fetch(`${API_BASE}/documents/${docId}/approve`, {
+      method: 'POST',
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || err.message || 'Approval failed');
+    }
+    return res.json();
   }
 };

@@ -11,6 +11,7 @@ export default function DocumentDetailView({ documentId, onBack }) {
   const [doc, setDoc] = useState(null);
   const [loading, setLoading] = useState(true);
   const [reprocessing, setReprocessing] = useState(false);
+  const [approving, setApproving] = useState(false);
   const [activeTab, setActiveTab] = useState('structured'); // structured, json, raw, rag, validation
   const [copied, setCopied] = useState(false);
   const [copiedField, setCopiedField] = useState(null);
@@ -32,6 +33,20 @@ export default function DocumentDetailView({ documentId, onBack }) {
       alert('Reprocessing failed: ' + err.message);
     } finally {
       setReprocessing(false);
+    }
+  };
+
+  const handleApprove = async () => {
+    if (!documentId) return;
+    setApproving(true);
+    try {
+      const updated = await api.approveDocument(documentId);
+      setDoc(updated);
+    } catch (err) {
+      console.error('Failed to approve document:', err);
+      alert('Approval failed: ' + err.message);
+    } finally {
+      setApproving(false);
     }
   };
 
@@ -149,6 +164,17 @@ export default function DocumentDetailView({ documentId, onBack }) {
           >
             <RefreshCw size={15} style={{ animation: reprocessing ? 'spin 1s linear infinite' : 'none' }} /> {reprocessing ? 'Reprocessing...' : 'Reprocess'}
           </button>
+          {(validation?.status === 'review_needed' || validation?.issues?.length > 0) && (
+            <button 
+              className="btn btn-primary" 
+              onClick={handleApprove}
+              disabled={approving}
+              style={{ background: 'var(--success)', borderColor: 'var(--success-border)', color: '#ffffff' }}
+              title="Mark document as manually reviewed and approved"
+            >
+              <CheckCircle2 size={15} /> {approving ? 'Approving...' : 'Approve Document'}
+            </button>
+          )}
           <a href={downloadUrl} className="btn btn-primary" download>
             <Download size={15} /> Download Original
           </a>
@@ -227,13 +253,35 @@ export default function DocumentDetailView({ documentId, onBack }) {
             <div style={{ overflowY: 'auto', flex: 1, paddingRight: 4 }}>
               {/* Validation Warning Alert if any */}
               {validation?.issues?.length > 0 && (
-                <div style={{ padding: '12px 16px', background: 'var(--warning-bg)', border: '1px solid rgba(245, 158, 11, 0.3)', borderRadius: 'var(--radius-md)', marginBottom: 20 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--warning)', fontWeight: 600, fontSize: '0.88rem' }}>
-                    <AlertTriangle size={16} /> Validation Notice:
+                <div style={{ padding: '14px 18px', background: 'var(--warning-bg)', border: '1px solid rgba(245, 158, 11, 0.3)', borderRadius: 'var(--radius-md)', marginBottom: 20 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--warning)', fontWeight: 600, fontSize: '0.88rem' }}>
+                      <AlertTriangle size={18} /> Review Notice (Attention Needed):
+                    </div>
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      <button 
+                        className="btn btn-secondary" 
+                        onClick={handleReprocess}
+                        disabled={reprocessing}
+                        style={{ padding: '5px 10px', fontSize: '0.78rem' }}
+                        title="Re-run OCR & extraction with updated engine"
+                      >
+                        <RefreshCw size={13} style={{ animation: reprocessing ? 'spin 1s linear infinite' : 'none' }} /> {reprocessing ? 'Reprocessing...' : 'Re-extract Data'}
+                      </button>
+                      <button 
+                        className="btn btn-primary" 
+                        onClick={handleApprove}
+                        disabled={approving}
+                        style={{ padding: '5px 12px', fontSize: '0.78rem', background: 'var(--success)', borderColor: 'var(--success-border)', color: '#ffffff' }}
+                        title="Mark as reviewed and clear warning"
+                      >
+                        <CheckCircle2 size={13} /> {approving ? 'Approving...' : 'Mark as Approved'}
+                      </button>
+                    </div>
                   </div>
-                  <ul style={{ margin: '6px 0 0 24px', fontSize: '0.82rem', color: 'var(--warning)' }}>
+                  <ul style={{ margin: '8px 0 0 24px', fontSize: '0.82rem', color: 'var(--warning)' }}>
                     {validation.issues.map((iss, idx) => (
-                      <li key={idx}>{iss.message}</li>
+                      <li key={idx} style={{ marginTop: 2 }}>{iss.message}</li>
                     ))}
                   </ul>
                 </div>
