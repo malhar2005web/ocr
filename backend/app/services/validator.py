@@ -48,13 +48,18 @@ class DocumentValidator:
                 })
 
         # 3. Financial calculations check
-        custom = content.get("custom_fields", {})
-        g_and_t = custom.get("goods_and_tax_details", {})
-        tax_details = g_and_t.get("tax_details", {})
+        custom = content.get("custom_fields", {}) if isinstance(content, dict) else {}
+        g_and_t = custom.get("goods_and_tax_details", {}) if isinstance(custom, dict) and isinstance(custom.get("goods_and_tax_details"), dict) else {}
+        tax_details = g_and_t.get("tax_details", {}) if isinstance(g_and_t, dict) and isinstance(g_and_t.get("tax_details"), dict) else {}
         taxable = custom.get("taxable_value") or custom.get("assessable_value") or g_and_t.get("subtotal")
-        cgst = custom.get("cgst") or tax_details.get("cgst", {}).get("amount")
-        sgst = custom.get("sgst") or tax_details.get("sgst", {}).get("amount")
-        igst = custom.get("igst") or tax_details.get("igst", {}).get("amount") or 0
+
+        cgst_info = tax_details.get("cgst") if isinstance(tax_details, dict) and isinstance(tax_details.get("cgst"), dict) else {}
+        sgst_info = tax_details.get("sgst") if isinstance(tax_details, dict) and isinstance(tax_details.get("sgst"), dict) else {}
+        igst_info = tax_details.get("igst") if isinstance(tax_details, dict) and isinstance(tax_details.get("igst"), dict) else {}
+
+        cgst = custom.get("cgst") or cgst_info.get("amount")
+        sgst = custom.get("sgst") or sgst_info.get("amount")
+        igst = custom.get("igst") or igst_info.get("amount") or 0
         grand_total = custom.get("grand_total") or g_and_t.get("total_amount_after_tax")
 
         if taxable is not None and grand_total is not None:
