@@ -369,10 +369,14 @@ class UniversalLLMExtractor:
         # 4. Fallback product regex line detection (e.g. for noisy OCR scans)
         if not goods_rows:
             for line in lines:
+                if any(term in line.lower() for term in ["terms", "condition", "details", "invoice", "bank", "address"]):
+                    continue
                 if re.search(r'\b(M-?\d+|concrete|cement|charge|item|qty|goods)\b', line, re.I):
+                    amounts = re.findall(r'[\d,]+\.\d{2}', line)
+                    if not amounts:
+                        continue
                     hsn_m = re.search(r'\b(\d{6,8})\b', line)
                     qty_m = re.search(r'(\d+[\.,]\d{2,3})\s*(CU\.?MT|MT|NOS|KG|LTR|PCS|M3)?', line, re.I)
-                    amounts = re.findall(r'[\d,]+\.\d{2}', line)
                     desc_m = re.search(r'([A-Za-z0-9\s\-]{3,25})(?=\s+\d{6,8}|\s+\d+[\.,]\d{2,3})', line)
                     
                     desc = desc_m.group(1).strip() if desc_m else "Item"
@@ -389,65 +393,119 @@ class UniversalLLMExtractor:
                         })
 
         # Dynamic Taxes (CGST, SGST, IGST)
-        cgst_rate_m = re.search(r'(\d+(?:\.\d+)?%)\s*(?:\n|\s)*CGST|CGST\s*(?:@\s*)?(\d+(?:\.\d+)?%)', raw_text, re.I)
-        cgst_rate = (cgst_rate_m.group(1) or cgst_rate_m.group(2)) if cgst_rate_m else "9%"
-        cgst_amt_m = re.search(r'CGST\s*[\n\r\s]*[:\s₹Rs\.]*([\d,]+\.\d{2})', raw_text, re.I)
-        if cgst_amt_m:
-            val = float(cgst_amt_m.group(1).replace(",", ""))
-            custom["cgst"] = val
-            custom["cgst_amount"] = val
-            custom["cgst_rate"] = cgst_rate
-            goods_rows.append({
-                "SI No": "-",
-                "Description of Goods": f"CGST @ {cgst_rate}",
-                "HSN/SAC": "-",
-                "Quantity": "-",
-                "Rate": cgst_rate,
-                "Per": "-",
-                "Amount": f"{val:,.2f}"
-            })
+        for idx, line in enumerate(lines):
+            l_clean = line.strip()
+            # CGST
+            if re.search(r'\bcgst\b', l_clean, re.I) and "cgst" not in custom:
+                rate_m = re.search(r'(\d+(?:\.\d+)?)\s*%', l_clean)
+                if not rate_m and idx > 0:
+                    rate_m = re.search(r'(\d+(?:\.\d+)?)\s*%', lines[idx - 1])
+                cgst_rate = f"{rate_m.group(1)}%" if rate_m else "9%"
+                
+                clean_l = re.sub(r'\d+(?:\.\d+)?%', '', l_clean)
+                amts = re.findall(r'[\d,]+\.\d{2}', clean_l)
+                if not amts and idx + 1 < len(lines):
+                    c_next = re.sub(r'\d+(?:\.\d+)?%', '', lines[idx + 1])
+                    amts = re.findall(r'[\d,]+\.\d{2}', c_next)
+                
+                if amts:
+                    val = float(amts[-1].replace(",", ""))
+                    custom["cgst"] = val
+                    custom["cgst_amount"] = val
+                    custom["cgst_rate"] = cgst_rate
+                    goods_rows.append({
+                        "SI No": "-",
+                        "Description of Goods": f"CGST @ {cgst_rate}",
+                        "HSN/SAC": "-",
+                        "Quantity": "-",
+                        "Rate": cgst_rate,
+                        "Per": "-",
+                        "Amount": f"{val:,.2f}"
+                    })
+            
+            # SGST
+            elif re.search(r'\bsgst\b', l_clean, re.I) and "sgst" not in custom:
+                rate_m = re.search(r'(\d+(?:\.\d+)?)\s*%', l_clean)
+                if not rate_m and idx + 1 < len(lines):
+                    rate_m = re.search(r'(\d+(?:\.\d+)?)\s*%', lines[idx + 1])
+                sgst_rate = f"{rate_m.group(1)}%" if rate_m else "9%"
+                
+                clean_l = re.sub(r'\d+(?:\.\d+)?%', '', l_clean)
+                amts = re.findall(r'[\d,]+\.\d{2}', clean_l)
+                if not amts and idx + 1 < len(lines):
+                    c_next = re.sub(r'\d+(?:\.\d+)?%', '', lines[idx + 1])
+                    amts = re.findall(r'[\d,]+\.\d{2}', c_next)
+                if not amts and idx + 2 < len(lines):
+                    c_next2 = re.sub(r'\d+(?:\.\d+)?%', '', lines[idx + 2])
+                    amts = re.findall(r'[\d,]+\.\d{2}', c_next2)
+                
+                if amts:
+                    val = float(amts[-1].replace(",", ""))
+                    custom["sgst"] = val
+                    custom["sgst_amount"] = val
+                    custom["sgst_rate"] = sgst_rate
+                    goods_rows.append({
+                        "SI No": "-",
+                        "Description of Goods": f"SGST @ {sgst_rate}",
+                        "HSN/SAC": "-",
+                        "Quantity": "-",
+                        "Rate": sgst_rate,
+                        "Per": "-",
+                        "Amount": f"{val:,.2f}"
+                    })
 
-        sgst_rate_m = re.search(r'(\d+(?:\.\d+)?%)\s*(?:\n|\s)*SGST|SGST\s*(?:@\s*)?(\d+(?:\.\d+)?%)', raw_text, re.I)
-        sgst_rate = (sgst_rate_m.group(1) or sgst_rate_m.group(2)) if sgst_rate_m else "9%"
-        sgst_amt_m = re.search(r'SGST\s*(?:9\.00%\s*)?[\n\r\s]*[:\s₹Rs\.]*([\d,]+\.\d{2})', raw_text, re.I)
-        if sgst_amt_m:
-            val = float(sgst_amt_m.group(1).replace(",", ""))
-            custom["sgst"] = val
-            custom["sgst_amount"] = val
-            custom["sgst_rate"] = sgst_rate
-            goods_rows.append({
-                "SI No": "-",
-                "Description of Goods": f"SGST @ {sgst_rate}",
-                "HSN/SAC": "-",
-                "Quantity": "-",
-                "Rate": sgst_rate,
-                "Per": "-",
-                "Amount": f"{val:,.2f}"
-            })
+        # Taxable Value & Financial Totals
+        actual_item_rows = [r for r in goods_rows if r.get("SI No") != "-" and r.get("Amount") and r["Amount"] != "-"]
+        item_amounts = []
+        for r in actual_item_rows:
+            try:
+                item_amounts.append(float(str(r["Amount"]).replace(",", "")))
+            except (ValueError, TypeError):
+                pass
+        
+        computed_taxable = sum(item_amounts) if item_amounts else None
 
-        # Dynamic Financial Totals
+        if "taxable_value" not in custom:
+            taxable_m = re.search(r'(?:Taxable\s*Value|Assessable\s*Value)\s*[:\-\s₹Rs\.]*([\d,]+\.\d{2})', raw_text, re.I)
+            if not taxable_m:
+                taxable_m = re.search(r'([\d,]+\.\d{2})\s*\n\s*[\d\.]+\s*\n\s*[A-Za-z0-9\.]+\s*\n\s*Total', raw_text, re.I)
+            if taxable_m:
+                try:
+                    custom["taxable_value"] = float(taxable_m.group(1).replace(",", ""))
+                except ValueError:
+                    pass
+            elif computed_taxable:
+                custom["taxable_value"] = computed_taxable
+
+        cgst_val = custom.get("cgst", 0.0)
+        sgst_val = custom.get("sgst", 0.0)
+        tot_tax = cgst_val + sgst_val
+        if tot_tax > 0:
+            custom["total_tax_amount"] = tot_tax
+
+        # Grand Total
         gt_m = re.search(r'(?:Total\s*Amount|Grand\s*Total|Total\s*Payable|Net\s*Amount)\s*[:\-\s₹Rs\.]*([\d,]+\.\d{2})', raw_text, re.I)
         if not gt_m:
             gt_m = re.search(r'([\d,]+\.\d{2})\s*\n\s*(?:Total\s*Amount|Grand\s*Total|Net\s*Amount)', raw_text, re.I)
         
-        taxable_m = re.search(r'(?:Taxable\s*Value|Assessable\s*Value)\s*[:\-\s₹Rs\.]*([\d,]+\.\d{2})', raw_text, re.I)
-        if not taxable_m:
-            taxable_m = re.search(r'([\d,]+\.\d{2})\s*\n\s*[\d\.]+\s*\n\s*[A-Za-z0-9\.]+\s*\n\s*Total', raw_text, re.I)
-            if not taxable_m:
-                taxable_m = re.search(r'Total\s*[:\-\s₹Rs\.]*([\d,]+\.\d{2})', raw_text, re.I)
-
         if gt_m:
             custom["grand_total"] = float(gt_m.group(1).replace(",", ""))
-        elif "cgst" in custom and "sgst" in custom and taxable_m:
-            custom["grand_total"] = float(taxable_m.group(1).replace(",", "")) + custom["cgst"] + custom["sgst"]
+        
+        if not custom.get("grand_total"):
+            for line in lines:
+                if re.search(r'\b(Total|TT)\b', line, re.I) and not re.search(r'\b(taxable|tax)\b', line, re.I):
+                    amts = re.findall(r'[\d,]+\.\d{2}', line)
+                    if amts:
+                        try:
+                            cand = float(amts[-1].replace(",", ""))
+                            if cand > (custom.get("taxable_value") or 0):
+                                custom["grand_total"] = cand
+                                break
+                        except ValueError:
+                            pass
 
-        if taxable_m:
-            custom["taxable_value"] = float(taxable_m.group(1).replace(",", ""))
-        elif "grand_total" in custom and "cgst" in custom and "sgst" in custom:
-            custom["taxable_value"] = custom["grand_total"] - (custom["cgst"] + custom["sgst"])
-
-        if "cgst" in custom and "sgst" in custom:
-            custom["total_tax_amount"] = custom["cgst"] + custom["sgst"]
+        if not custom.get("grand_total") and custom.get("taxable_value") and tot_tax > 0:
+            custom["grand_total"] = round(custom["taxable_value"] + tot_tax, 2)
 
         # Dynamic Total Quantity
         qty_m = re.search(r'(\d+[\.,]\d{2,3})\s*([A-Za-z0-9\.\/]+)\s*\n\s*Total', raw_text, re.I)
@@ -456,11 +514,11 @@ class UniversalLLMExtractor:
         
         if qty_m:
             custom["total_quantity"] = f"{qty_m.group(1)} {qty_m.group(2)}".strip() if qty_m.lastindex >= 2 else qty_m.group(1).strip()
-        elif goods_rows:
-            custom["total_quantity"] = goods_rows[0].get("Quantity", "-")
+        elif actual_item_rows:
+            custom["total_quantity"] = actual_item_rows[0].get("Quantity", "-")
 
         # Add Total row to goods_rows
-        if "grand_total" in custom:
+        if "grand_total" in custom and not any(r.get("Description of Goods") == "Total" for r in goods_rows):
             goods_rows.append({
                 "SI No": "-",
                 "Description of Goods": "Total",
@@ -487,11 +545,17 @@ class UniversalLLMExtractor:
             })
 
         # Dynamic PAN and GSTIN
-        pans = list(set(re.findall(r'\b[A-Z]{5}\d{4}[A-Z]\b', raw_text)))
+        pan_m = re.search(r'(?:PAN|P\.A\.N\.)\s*(?:No\.?)?\s*[:\-\s»]*([A-Z0-9]{10})\b', raw_text, re.I)
+        if pan_m:
+            custom["company_pan"] = pan_m.group(1)
+            extra_kv.append({"key": "Company PAN", "value": pan_m.group(1), "page": 1})
+        else:
+            pans = list(set(re.findall(r'\b[A-Z]{5}\d{4}[A-Z]\b', raw_text)))
+            if pans:
+                custom["company_pan"] = pans[0]
+                extra_kv.append({"key": "Company PAN", "value": pans[0], "page": 1})
+
         gstins = list(set(re.findall(r'\b\d{2}[A-Z]{5}\d{4}[A-Z\d]{1}[A-Z\d]{1}Z[A-Z\d]{1}\b', raw_text)))
-        if pans:
-            custom["company_pan"] = pans[0]
-            extra_kv.append({"key": "Company PAN", "value": pans[0], "page": 1})
         if gstins:
             custom["supplier_gstin"] = gstins[0]
             extra_kv.append({"key": "Supplier GSTIN", "value": gstins[0], "page": 1})
