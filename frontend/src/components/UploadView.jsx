@@ -1,5 +1,5 @@
 import React, { useState, useRef } from 'react';
-import { Upload, FileUp, CheckCircle2, AlertCircle, Loader2, ArrowRight, Eye, Trash2 } from 'lucide-react';
+import { Upload, FileUp, CheckCircle2, AlertCircle, Loader2, ArrowRight, Eye, Trash2, Plus } from 'lucide-react';
 import { api } from '../services/api';
 
 export default function UploadView({ onSelectDocument }) {
@@ -110,18 +110,23 @@ export default function UploadView({ onSelectDocument }) {
           style={{ display: 'none' }}
           onChange={handleChange}
         />
-        <div style={{ width: 64, height: 64, margin: '0 auto 16px', borderRadius: '50%', background: 'var(--tiffany-tint)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--tiffany-deep)' }}>
-          <FileUp size={32} />
+        {/* Big Simple Plus Button with Dotted Circular Ring Surrounding It */}
+        <div className="plus-upload-wrapper">
+          <div className="dotted-ring">
+            <div className="plus-btn-circle">
+              <Plus size={46} strokeWidth={2.4} />
+            </div>
+          </div>
         </div>
-        <h3 style={{ fontSize: '1.2rem', fontWeight: 600, color: 'var(--text-main)', marginBottom: 8 }}>
-          Drag & Drop PDF or Image files here
-        </h3>
-        <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginBottom: 18 }}>
-          Supports Native PDF, Scanned PDF, JPG, PNG (up to 50MB per file)
-        </p>
-        <button type="button" className="btn btn-primary" onClick={(e) => { e.stopPropagation(); inputRef.current?.click(); }}>
-          <Upload size={16} /> Browse From Computer
-        </button>
+
+        <div style={{ marginTop: 22 }}>
+          <div style={{ fontSize: '1.05rem', fontWeight: 600, color: 'var(--text-main)', marginBottom: 4 }}>
+            Click or drag files here to upload
+          </div>
+          <div style={{ color: 'var(--text-dim)', fontSize: '0.82rem' }}>
+            Supports PDF, JPG, PNG (up to 50MB per file)
+          </div>
+        </div>
       </div>
 
       {/* Selected File Queue */}

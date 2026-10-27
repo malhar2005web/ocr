@@ -460,18 +460,71 @@ body {
 
 /* Upload Dropzone */
 .upload-dropzone {
-  border: 2px dashed rgba(10, 186, 181, 0.5);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-lg);
-  padding: 44px 24px;
+  padding: 56px 24px;
   text-align: center;
-  background: rgba(255, 255, 255, 0.7);
-  transition: all 0.2s ease;
+  background: var(--bg-card);
+  transition: all 0.22s ease;
   cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  box-shadow: var(--shadow-sm);
 }
 
 .upload-dropzone:hover, .upload-dropzone.drag-active {
   border-color: var(--tiffany);
+  background: rgba(234, 246, 245, 0.45);
+  box-shadow: 0 4px 20px rgba(10, 186, 181, 0.12);
+}
+
+/* Big Simple Plus Button with Dotted Circular Ring */
+.plus-upload-wrapper {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.dotted-ring {
+  width: 140px;
+  height: 140px;
+  border-radius: 50%;
+  border: 2.5px dotted var(--tiffany);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px;
+  transition: all 0.28s ease;
+  background: rgba(10, 186, 181, 0.04);
+}
+
+.upload-dropzone:hover .dotted-ring,
+.dotted-ring:hover {
+  border-color: var(--tiffany-deep);
+  transform: scale(1.06);
+  background: rgba(10, 186, 181, 0.08);
+  box-shadow: 0 0 24px rgba(10, 186, 181, 0.22);
+}
+
+.plus-btn-circle {
+  width: 92px;
+  height: 92px;
+  border-radius: 50%;
   background: var(--tiffany-tint);
+  color: var(--tiffany-deep);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.25s ease;
+  box-shadow: 0 2px 10px rgba(10, 186, 181, 0.15);
+}
+
+.upload-dropzone:hover .plus-btn-circle {
+  background: var(--tiffany);
+  color: #ffffff;
+  transform: scale(1.05);
 }
 
 /* Tab Navigation */
