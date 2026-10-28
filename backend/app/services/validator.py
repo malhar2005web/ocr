@@ -28,7 +28,10 @@ class DocumentValidator:
 
         # 2. Check for missing critical metadata in structured documents
         if doc_type in ["tax_invoice", "delivery_challan", "purchase_order"]:
-            if not metadata.get("dates"):
+            custom = content.get("custom_fields", {}) if isinstance(content, dict) else {}
+            inv_details = custom.get("contract_and_invoice_details", {}).get("invoice_details", {}) if isinstance(custom, dict) else {}
+            has_date = bool(metadata.get("dates")) or bool(inv_details.get("invoice_date")) or bool(custom.get("goods_and_tax_details", {}).get("acknowledgement_date"))
+            if not has_date:
                 issues.append({
                     "field": "metadata.dates",
                     "issue_type": "missing_date",

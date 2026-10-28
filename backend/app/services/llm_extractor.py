@@ -354,8 +354,9 @@ Audit the candidate data against the document text. Return JSON with audit_statu
             doc_type = "bill_receipt"
 
         # 2. Extract Dates
-        date_pattern = r"\b(\d{1,2}[-/\.]\d{1,2}[-/\.]\d{2,4}|\d{4}[-/\.]\d{1,2}[-/\.]\d{1,2}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]* \d{1,2},? \d{4})\b"
-        dates = list(set(re.findall(date_pattern, raw_text, flags=re.IGNORECASE)))
+        date_pattern = r"\b(\d{1,2}[-/\.](?:[A-Za-z]{3}|\d{1,2})[-/\.]\d{2,4}|\d{4}[-/\.]\d{1,2}[-/\.]\d{1,2}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]* \d{1,2},? \d{4})\b"
+        raw_dates = list(set(re.findall(date_pattern, raw_text, flags=re.IGNORECASE)))
+        dates = [self._format_date_iso(d) for d in raw_dates if self._format_date_iso(d)]
 
         # 3. Extract GSTIN / Tax IDs (Indian GSTIN format: 2 digits, 5 letters, 4 digits, 1 letter, 1 char, Z, 1 char)
         gstin_pattern = r"\b\d{2}[A-Z]{5}\d{4}[A-Z]{1}[A-Z\d]{1}Z[A-Z\d]{1}\b"
