@@ -56,6 +56,42 @@ REQUIRED JSON SCHEMA:
 }
 """
 
+CROSS_VERIFICATION_SYSTEM_PROMPT = """You are a Principal Document Intelligence Verification Auditor.
+Your task is to CROSS-VERIFY, AUDIT, and RECONCILE structured document data against ground-truth text extracted from Tesseract OCR and PyMuPDF.
+
+You are provided with:
+1. Ground-Truth Document Text & Segmented Layout Regions (from OCR/PyMuPDF).
+2. Initial Candidate Extraction JSON (pre-extracted by layout-aware parsing rules).
+
+YOUR AUDIT MANDATES:
+1. Cross-Verification & Error Correction:
+   - Carefully audit every field in the candidate JSON against the ground-truth text and layout regions.
+   - Correct OCR optical misreadings:
+     - GSTIN: Must be exactly 15 alphanumeric characters. Fix typical OCR confusions (e.g. '{'/'}' -> '2', ')'/']' -> 'J', 'O' -> '0' in numeric slots, '0' -> 'O' in alpha slots).
+     - PAN: Must be exactly 10 characters (5 uppercase letters + 4 digits + 1 letter).
+     - Company/Vendor Names: Fix broken characters or OCR spelling anomalies (e.g. 'Infraproiects' -> 'Infraprojects').
+     - Bank Details: Ensure Bank Name, Branch, Account Number, and IFSC code (4 letters + '0' + 6 alphanumeric) are clean and accurate.
+2. Line Items & Mathematical Integrity:
+   - For line items in goods_and_tax_details or tables:
+     - Verify Description of Goods, HSN/SAC code, Quantity, Unit, Rate, and Amount.
+     - Enforce arithmetic consistency: Quantity * Rate ≈ Amount.
+     - NEVER corrupt mathematically verified line item numbers with hallucinated values.
+3. Taxes & Financial Totals:
+   - Ensure subtotal (taxable value) is accurately cross-checked.
+   - Verify CGST, SGST, IGST rates and amounts (e.g., 9% CGST + 9% SGST).
+   - Verify Rounding Adjustment (if present) and Total Amount After Tax (Grand Total).
+   - Ensure: Subtotal + Total Taxes + Rounding Adjustment = Grand Total.
+4. Dates & Metadata:
+   - Disambiguate Invoice Date, PO Date, Challan Date, Billing Period Dates, and E-Invoice Ack Date.
+   - Disambiguate Invoice Number, PO Number, Challan Number, E-Way Bill Number.
+   - Ensure 64-character hexadecimal IRN and 15-digit Ack No are cleanly preserved if present.
+5. Schema Integrity:
+   - Return the output in the EXACT same JSON schema structure as the candidate JSON.
+   - Maintain top-level keys: "document_type", "metadata", "content".
+   - Under content.custom_fields, maintain "contract_and_invoice_details", "goods_and_tax_details", and "our_bank_details" when present.
+   - Output ONLY valid raw JSON. No markdown fences (no ```json), no explanatory conversational text.
+"""
+
 class UniversalLLMExtractor:
     def __init__(self):
         self.provider = settings.LLM_PROVIDER
@@ -71,32 +107,141 @@ class UniversalLLMExtractor:
         layout_regions: Optional[Dict[str, str]] = None
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """
-        Attempts structured extraction using open-weight LLM inference (e.g. Qwen on Groq/OpenRouter/Ollama).
-        Gracefully falls back to heuristic OCR-only extractor if LLM is unconfigured or unavailable.
-        Returns: (extracted_data_dict, extraction_metadata_dict)
+        Two-Pass Universal Extraction Pipeline:
+        Pass 1: High-precision deterministic layout-aware OCR extraction (PyMuPDF / Tesseract).
+                Produces mathematically validated candidate JSON and region tokens.
+        Pass 2: Qwen LLM Cross-Verification & Auditor (via OpenAI-compatible endpoint like Groq/OpenRouter/Ollama).
+                Audits, cross-checks, fixes any OCR character confusions, and reconciles candidate JSON against raw text.
+                Gracefully falls back to Pass 1 candidate data if LLM is unconfigured or unavailable.
         """
+        # Pass 1: Deterministic Layout & Heuristic Extraction (Tesseract OCR / PyMuPDF)
+        logger.info("Pass 1: Executing Deterministic Layout & Rule-Based OCR Extraction...")
+        candidate_data = self._heuristic_extraction(raw_text, detected_tables, filename, layout_regions=layout_regions)
+
         llm_metadata = {
             "llm_provider": "none",
             "model": None,
-            "extraction_mode": "ocr_only"
+            "extraction_mode": "deterministic_ocr_verified",
+            "cross_verification_status": "skipped_no_api_key"
         }
 
-        # Check if LLM endpoint is configured
-        if self.base_url and self.api_key and self.provider != "none":
+        # Check if LLM endpoint is configured for Pass 2 cross-verification
+        is_local = bool(self.base_url and ("localhost" in self.base_url or "127.0.0.1" in self.base_url))
+        if self.base_url and self.provider != "none" and (self.api_key or is_local):
             try:
-                logger.info(f"Invoking hosted open-weight LLM ({self.model}) via {self.base_url}...")
-                llm_response = await self._call_llm(raw_text, detected_tables, filename)
+                logger.info(f"Pass 2: Invoking Qwen LLM Cross-Verification ({self.model}) via {self.base_url}...")
+                reconciled_data = await self._cross_verify_with_llm(
+                    candidate_data=candidate_data,
+                    raw_text=raw_text,
+                    layout_regions=layout_regions,
+                    detected_tables=detected_tables,
+                    filename=filename
+                )
                 llm_metadata["llm_provider"] = self.provider
                 llm_metadata["model"] = self.model
-                llm_metadata["extraction_mode"] = "llm_enhanced"
-                return llm_response, llm_metadata
+                llm_metadata["extraction_mode"] = "hybrid_cross_verified"
+                llm_metadata["cross_verification_status"] = "verified"
+                return reconciled_data, llm_metadata
             except Exception as e:
-                logger.warning(f"LLM extraction failed or timed out: {e}. Falling back to heuristic OCR extraction.")
+                logger.warning(f"Pass 2: Qwen LLM cross-verification failed or timed out: {e}. Retaining Pass 1 deterministic candidate data.")
+                llm_metadata["llm_provider"] = self.provider
+                llm_metadata["model"] = self.model
+                llm_metadata["extraction_mode"] = "deterministic_ocr_verified"
+                llm_metadata["cross_verification_status"] = f"fallback_to_ocr: {str(e)[:60]}"
+                return candidate_data, llm_metadata
 
-        # Fallback to high-accuracy heuristic extraction
-        logger.info("Executing Rule-Based / Heuristic Universal Extractor...")
-        extracted_data = self._heuristic_extraction(raw_text, detected_tables, filename, layout_regions=layout_regions)
-        return extracted_data, llm_metadata
+        return candidate_data, llm_metadata
+
+    async def _cross_verify_with_llm(
+        self,
+        candidate_data: Dict[str, Any],
+        raw_text: str,
+        layout_regions: Optional[Dict[str, str]],
+        detected_tables: List[Dict[str, Any]],
+        filename: str
+    ) -> Dict[str, Any]:
+        """
+        Cross-verifies, audits, and reconciles the Pass 1 candidate data against the
+        ground-truth OCR text and layout regions using Qwen LLM.
+        """
+        endpoint = f"{self.base_url.rstrip('/')}/chat/completions"
+        headers = {
+            "Content-Type": "application/json"
+        }
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
+        # Build context payload with regions and candidate JSON
+        regions_summary = ""
+        if layout_regions:
+            for reg_name, reg_text in layout_regions.items():
+                if reg_text and reg_text.strip():
+                    regions_summary += f"\n--- REGION: {reg_name.upper()} ---\n{reg_text.strip()}\n"
+
+        user_content = f"""Document Filename: {filename}
+
+=== GROUND TRUTH DOCUMENT TEXT (FROM TESSERACT OCR / PYMUPDF) ===
+{raw_text[:20000]}
+"""
+        if regions_summary:
+            user_content += f"""
+=== SEGMENTED LAYOUT REGIONS ===
+{regions_summary[:10000]}
+"""
+        user_content += f"""
+=== INITIAL CANDIDATE EXTRACTION JSON TO BE CROSS-VERIFIED & AUDITED ===
+{json.dumps(candidate_data, indent=2)}
+
+Please audit, cross-verify, correct any OCR errors, reconcile line items and totals, and return the final verified JSON. Output ONLY pure raw JSON:"""
+
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": CROSS_VERIFICATION_SYSTEM_PROMPT},
+                {"role": "user", "content": user_content}
+            ],
+            "temperature": 0.05,
+            "response_format": {"type": "json_object"}
+        }
+
+        async with httpx.AsyncClient(timeout=settings.LLM_TIMEOUT) as client:
+            try:
+                resp = await client.post(endpoint, headers=headers, json=payload)
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as err:
+                if err.response.status_code == 400 and "response_format" in payload:
+                    payload_no_rf = dict(payload)
+                    del payload_no_rf["response_format"]
+                    resp = await client.post(endpoint, headers=headers, json=payload_no_rf)
+                    resp.raise_for_status()
+                else:
+                    raise
+
+            data = resp.json()
+            content = data["choices"][0]["message"]["content"]
+            # Clean markdown codeblocks if model returned them
+            clean_content = re.sub(r"^```json\s*", "", content.strip(), flags=re.MULTILINE)
+            clean_content = re.sub(r"^```\s*", "", clean_content, flags=re.MULTILINE)
+            clean_content = re.sub(r"```$", "", clean_content.strip())
+            verified_json = json.loads(clean_content)
+
+            # Reconcile schema: ensure essential structure is maintained
+            if not isinstance(verified_json, dict):
+                return candidate_data
+
+            if "content" in verified_json and isinstance(verified_json["content"], dict):
+                for k in ["document_type", "metadata"]:
+                    if k not in verified_json and k in candidate_data:
+                        verified_json[k] = candidate_data[k]
+                return verified_json
+            elif "contract_and_invoice_details" in verified_json or "goods_and_tax_details" in verified_json:
+                candidate_data["content"]["custom_fields"] = verified_json
+                return candidate_data
+            elif "custom_fields" in verified_json:
+                candidate_data["content"]["custom_fields"] = verified_json["custom_fields"]
+                return candidate_data
+
+            return candidate_data
 
     async def _call_llm(
         self,

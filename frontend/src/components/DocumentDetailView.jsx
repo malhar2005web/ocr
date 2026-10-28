@@ -712,13 +712,23 @@ export default function DocumentDetailView({ documentId, onBack }) {
                     <strong style={{ color: 'var(--text-main)' }}>{extraction_metadata?.ocr_engine || 'None'}</strong>
                   </div>
                   <div>
-                    <span style={{ color: 'var(--text-dim)' }}>LLM Provider: </span>
-                    <strong style={{ color: 'var(--text-main)' }}>{extraction_metadata?.llm_provider || 'Heuristic Fallback'}</strong>
+                    <span style={{ color: 'var(--text-dim)' }}>LLM Auditor: </span>
+                    <strong style={{ color: 'var(--text-main)' }}>{extraction_metadata?.model || extraction_metadata?.llm_provider || 'Heuristic Fallback'}</strong>
                   </div>
                   <div>
                     <span style={{ color: 'var(--text-dim)' }}>Extraction Mode: </span>
-                    <strong style={{ color: 'var(--text-main)' }}>{extraction_metadata?.extraction_mode || 'ocr_only'}</strong>
+                    <strong style={{ color: extraction_metadata?.extraction_mode === 'hybrid_cross_verified' ? 'var(--success)' : 'var(--text-main)' }}>
+                      {extraction_metadata?.extraction_mode === 'hybrid_cross_verified' ? 'Hybrid (OCR + Qwen Verified)' : (extraction_metadata?.extraction_mode || 'ocr_only')}
+                    </strong>
                   </div>
+                  {extraction_metadata?.cross_verification_status && (
+                    <div style={{ gridColumn: 'span 2' }}>
+                      <span style={{ color: 'var(--text-dim)' }}>Cross-Verification: </span>
+                      <strong style={{ color: extraction_metadata?.cross_verification_status === 'verified' ? 'var(--success)' : 'var(--accent)' }}>
+                        {extraction_metadata?.cross_verification_status}
+                      </strong>
+                    </div>
+                  )}
                 </div>
               </div>
 

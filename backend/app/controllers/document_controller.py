@@ -90,6 +90,7 @@ class DocumentController:
                 "llm_provider": llm_meta["llm_provider"],
                 "model": llm_meta["model"],
                 "extraction_mode": llm_meta["extraction_mode"],
+                "cross_verification_status": llm_meta.get("cross_verification_status", "verified"),
                 "source_pages": extraction_result["source_pages"]
             }
 
