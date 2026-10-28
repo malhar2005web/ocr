@@ -125,10 +125,13 @@ class DocumentExtractor:
 
     def _extract_image(self, file_path: str, filename: str) -> Dict[str, Any]:
         ext = os.path.splitext(filename)[1].lower().lstrip(".")
+        layout_regions = {}
         try:
             img = Image.open(file_path)
             if self.ocr_engine.is_available():
-                extracted_text = self.ocr_engine.extract_text(img)
+                ocr_res = self.ocr_engine.extract_with_layout(img)
+                extracted_text = ocr_res["raw_text"]
+                layout_regions = ocr_res.get("layout_regions", {})
                 ocr_status = "tesseract"
             else:
                 extracted_text = "[OCR unavailable: Tesseract engine not configured on system]"
@@ -145,6 +148,7 @@ class DocumentExtractor:
             "raw_text": extracted_text,
             "pages": [{"page": 1, "text": extracted_text, "mode": "scanned_ocr", "tables": []}],
             "tables": [],
+            "layout_regions": layout_regions,
             "pdf_method": None,
             "ocr_engine": ocr_status,
             "source_pages": [1]

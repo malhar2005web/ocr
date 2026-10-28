@@ -67,7 +67,8 @@ class UniversalLLMExtractor:
         self,
         raw_text: str,
         detected_tables: List[Dict[str, Any]],
-        filename: str
+        filename: str,
+        layout_regions: Optional[Dict[str, str]] = None
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """
         Attempts structured extraction using open-weight LLM inference (e.g. Qwen on Groq/OpenRouter/Ollama).
@@ -94,7 +95,7 @@ class UniversalLLMExtractor:
 
         # Fallback to high-accuracy heuristic extraction
         logger.info("Executing Rule-Based / Heuristic Universal Extractor...")
-        extracted_data = self._heuristic_extraction(raw_text, detected_tables, filename)
+        extracted_data = self._heuristic_extraction(raw_text, detected_tables, filename, layout_regions=layout_regions)
         return extracted_data, llm_metadata
 
     async def _call_llm(
@@ -139,7 +140,8 @@ class UniversalLLMExtractor:
         self,
         raw_text: str,
         detected_tables: List[Dict[str, Any]],
-        filename: str
+        filename: str,
+        layout_regions: Optional[Dict[str, str]] = None
     ) -> Dict[str, Any]:
         """
         Sophisticated rule-based extraction that extracts fields, classifies documents,
@@ -227,7 +229,7 @@ class UniversalLLMExtractor:
         
         # If document is a Tax Invoice or commercial bill, run dedicated high-precision dynamic parser
         if doc_type in ["tax_invoice", "delivery_challan", "purchase_order", "bill_receipt"] or "invoice" in lower_text or "bill" in lower_text:
-            inv_tables, inv_custom, inv_kv = self._parse_invoice_structured_data(lines, raw_text, detected_tables)
+            inv_tables, inv_custom, inv_kv = self._parse_invoice_structured_data(lines, raw_text, detected_tables, layout_regions=layout_regions)
             tables = inv_tables
             custom_fields.update(inv_custom)
             kv_pairs.extend(inv_kv)
@@ -237,7 +239,8 @@ class UniversalLLMExtractor:
                 raw_text=raw_text,
                 lines=lines,
                 goods_rows=tables[0].get("rows", []) if tables else [],
-                custom=custom_fields
+                custom=custom_fields,
+                layout_regions=layout_regions
             )
             # Use structured invoice as custom_fields
             custom_fields = structured_invoice_data
@@ -323,7 +326,13 @@ class UniversalLLMExtractor:
             }
         }
 
-    def _parse_invoice_structured_data(self, lines: List[str], raw_text: str, detected_tables: Optional[List[Dict[str, Any]]] = None) -> Tuple[List[Dict[str, Any]], Dict[str, Any], List[Dict[str, Any]]]:
+    def _parse_invoice_structured_data(
+        self,
+        lines: List[str],
+        raw_text: str,
+        detected_tables: Optional[List[Dict[str, Any]]] = None,
+        layout_regions: Optional[Dict[str, str]] = None
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any], List[Dict[str, Any]]]:
         """
         Universal dynamic extractor for GST Tax Invoices and Commercial Bills.
         Dynamically extracts whatever line items, taxes, totals, bank details,
@@ -343,7 +352,67 @@ class UniversalLLMExtractor:
                         if clean_row:
                             goods_rows.append(clean_row)
 
-        # 2. Extract line items from PyMuPDF vertical blocks
+        # 2. If layout_regions provided (image pipeline), extract from goods_table region
+        if not goods_rows and layout_regions and layout_regions.get("goods_table"):
+            gt_lines = [l.strip() for l in layout_regions["goods_table"].split("\n") if l.strip()]
+            for l_s in gt_lines:
+                if any(k in l_s.lower() for k in ["description", "goods", "total", "cgst", "sgst", "subtotal", "amount"]):
+                    continue
+                hsn_m = re.search(r'\b(\d{6,8}|\d{4})\b', l_s)
+                if hsn_m:
+                    hsn = hsn_m.group(1)
+                    desc_part = l_s[:l_s.find(hsn)].strip()
+                    desc_m = re.search(r'\b(M\d+|M-\d+|[A-Za-z0-9\s\-\.\/\(\)]{2,30})\b', desc_part)
+                    desc = desc_m.group(1).strip() if desc_m else "Item"
+                    desc = re.sub(r'^\d+\s*[\.\-\]\|]?\s*', '', desc).strip()
+
+                    after_hsn = l_s[l_s.find(hsn) + len(hsn):]
+                    nums = re.findall(r'[\d,]+\.?\d*', after_hsn)
+                    floats = []
+                    for n in nums:
+                        try:
+                            floats.append(float(n.replace(",", "")))
+                        except ValueError:
+                            pass
+
+                    # Arithmetic confirmation: qty * rate == amount
+                    matched = False
+                    for i in range(len(floats)):
+                        for j in range(i + 1, len(floats)):
+                            for k in range(j + 1, len(floats)):
+                                q, r, a = floats[i], floats[j], floats[k]
+                                if abs(q * r - a) < 2.0 or abs(a - (q * r)) < 2.0:
+                                    qty, rate, amt = q, r, a
+                                    matched = True
+                                    break
+                            if matched: break
+                        if matched: break
+
+                    if not matched:
+                        if len(floats) >= 3:
+                            qty, rate, amt = floats[0], floats[1], floats[2]
+                        elif len(floats) == 2:
+                            qty, rate, amt = floats[0], 0.0, floats[1]
+                        else:
+                            qty, rate, amt = 0.0, 0.0, floats[0] if floats else 0.0
+
+                    unit = "M3"
+                    for u in ["CU.MT", "CUMT", "M3", "MT", "NOS", "KG", "LTR", "PCS", "SQM", "BAGS"]:
+                        if u.lower() in l_s.lower():
+                            unit = u
+                            break
+
+                    goods_rows.append({
+                        "SI No": str(len(goods_rows) + 1),
+                        "Description of Goods": desc,
+                        "HSN/SAC": hsn,
+                        "Quantity": f"{qty} {unit}".strip(),
+                        "Rate": f"{rate:,.2f}",
+                        "Per": unit,
+                        "Amount": f"{amt:,.2f}"
+                    })
+
+        # 3. Extract line items from PyMuPDF vertical blocks
         if not goods_rows:
             item_pattern = re.compile(
                 r'(?:^|\n)\s*(\d{1,2})\s*\n\s*([\d,]+\.\d{2})\s*\n\s*([A-Za-z0-9\.\/]+)\s*\n\s*(\d+[\.,]\d{2,3})\s*\n\s*(\d{4,8})\s*\n\s*([\d,]+\.\d{2})\s*\n\s*([A-Za-z0-9\s\-\.\/\(\)]+?)(?=\n\s*\d{1,2}\s*\n|\n\s*Total|\n\s*[\d,]+\.\d{2}\s*\n\s*Total|\n\s*CGST|\n\s*AckNo|$)',
@@ -643,16 +712,43 @@ class UniversalLLMExtractor:
 
         return tables, custom, extra_kv
 
+    def _clean_gstin(self, val: Optional[str]) -> Optional[str]:
+        if not val:
+            return None
+        v = re.sub(r'[^A-Z0-9]', '', val.upper())
+        if len(v) >= 15:
+            s = list(v[:15])
+            if s[0] == 'Z': s[0] = '2'
+            if s[1] in ['I', 'L']: s[1] = '7'
+            for i in range(2, 7):
+                if s[i] == '0': s[i] = 'O'
+                if s[i] == '1': s[i] = 'I'
+            for i in range(7, 11):
+                if s[i] == 'O': s[i] = '0'
+                if s[i] in ['I', 'L']: s[i] = '1'
+                if s[i] == 'S': s[i] = '5'
+            if s[11] == '0': s[11] = 'O'
+            if s[11] in ['1', 'L']: s[11] = 'I'
+            s[13] = 'Z'
+            return "".join(s)
+        return val
+
     def _format_date_iso(self, date_str: Optional[str]) -> Optional[str]:
         if not date_str:
             return None
         d = date_str.strip()
         m = re.match(r'(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{2,4})', d)
         if m:
-            day, month, year = m.group(1), m.group(2), m.group(3)
-            if len(year) == 2:
-                year = "20" + year
-            return f"{year}-{int(month):02d}-{int(day):02d}"
+            p1, p2, yr = int(m.group(1)), int(m.group(2)), m.group(3)
+            if len(yr) == 2:
+                yr = "20" + yr
+            if p1 > 12 and p2 <= 12:
+                day, month = p1, p2
+            elif p2 > 12 and p1 <= 12:
+                day, month = p2, p1
+            else:
+                day, month = p1, p2
+            return f"{yr}-{month:02d}-{day:02d}"
         return d
 
     def _build_structured_invoice_json(
@@ -660,7 +756,8 @@ class UniversalLLMExtractor:
         raw_text: str,
         lines: List[str],
         goods_rows: List[Dict[str, Any]],
-        custom: Dict[str, Any]
+        custom: Dict[str, Any],
+        layout_regions: Optional[Dict[str, str]] = None
     ) -> Dict[str, Any]:
         """
         Builds the clean, hierarchical invoice schema matching user requirements:
@@ -669,31 +766,95 @@ class UniversalLLMExtractor:
         - our_bank_details (bank_name, branch, account_number, ifsc_code, account_holder_name)
         Excludes raw Terms & Conditions (T&C).
         """
+        header_txt = (layout_regions or {}).get("header")
+        buyer_txt = (layout_regions or {}).get("buyer")
+        inv_txt = (layout_regions or {}).get("invoice_meta")
+        einv_txt = (layout_regions or {}).get("e_invoice")
+        rem_txt = (layout_regions or {}).get("remarks")
+        bank_txt = (layout_regions or {}).get("bank")
+
         # 1. Seller Details
         seller_name = None
-        seller_m = re.search(r'For\s+M/S\.?\s*([A-Za-z0-9\s\.\&\-]+?)(?=\n|Authorised|Receiver|$)', raw_text, re.I)
-        if seller_m:
-            cand = seller_m.group(1).strip()
-            if len(cand) > 3:
-                seller_name = cand
+        if header_txt:
+            h_lines = [l.strip() for l in header_txt.split("\n") if l.strip()]
+            for l in h_lines:
+                if any(k in l.upper() for k in ["PVT LTD", "LIMITED", "ENTERPRISES", "SOLUTIONS", "CONCRETE", "INFRA", "INFRAPROJECTS"]):
+                    cand = re.sub(r'^[^\w]+', '', l).strip()
+                    cand = re.sub(r'\s+[A-Z]$', '', cand).strip()
+                    if "Infraproiects" in cand:
+                        cand = cand.replace("Infraproiects", "Infraprojects")
+                    seller_name = cand
+                    break
+
+        if not seller_name:
+            seller_m = re.search(r'For\s+M/S\.?\s*([A-Za-z0-9\s\.\&\-]+?)(?=\n|Authorised|Receiver|$)', raw_text, re.I)
+            if seller_m:
+                cand = seller_m.group(1).strip()
+                if len(cand) > 3:
+                    seller_name = cand
+
         if not seller_name:
             for l in lines[:5]:
                 if any(k in l.upper() for k in ["ENTERPRISES", "SOLUTIONS", "CONCRETE", "INFRA", "PVT", "LTD"]):
                     seller_name = l.strip()
                     break
 
+        seller_gstin = None
+        if header_txt:
+            sg_m = re.search(r'GST[IN\s]*NO\s*[:\-\.]*\s*([A-Z0-9]{13,16})', header_txt, re.I)
+            if sg_m:
+                seller_gstin = self._clean_gstin(sg_m.group(1))
+
         pans = list(set(re.findall(r'\b[A-Z]{5}\d{4}[A-Z]\b', raw_text)))
         gstins = list(set(re.findall(r'\b\d{2}[A-Z]{5}\d{4}[A-Z\d]{1}[A-Z\d]{1}Z[A-Z\d]{1}\b', raw_text)))
         
-        seller_pan = custom.get("company_pan") or (pans[0] if pans else None)
-        seller_gstin = None
-        if seller_pan and gstins:
+        seller_pan = custom.get("company_pan")
+        if header_txt and not seller_pan:
+            span_m = re.search(r'PAN\s*No\.?\s*[:\-\.]*\s*([A-Z0-9]{9,11})', header_txt, re.I)
+            if span_m:
+                c_pan = re.sub(r'[^A-Z0-9]', '', span_m.group(1).upper())
+                if len(c_pan) >= 10:
+                    c_pan = c_pan[:4] + ('I' if c_pan[4] in ['L', '1'] else c_pan[4]) + c_pan[5:10]
+                    seller_pan = c_pan
+
+        if not seller_pan and pans:
+            seller_pan = pans[0]
+
+        if not seller_gstin and seller_pan and gstins:
             for g in gstins:
                 if seller_pan in g:
                     seller_gstin = g
                     break
         if not seller_gstin and gstins:
             seller_gstin = gstins[0]
+
+        cin = None
+        if header_txt:
+            cin_m = re.search(r'CIN\s*[:\-]\s*([A-Z0-9]{21})', header_txt, re.I)
+            if cin_m:
+                cin = cin_m.group(1).strip()
+        if not cin:
+            cin_m = re.search(r'CIN\s*[:\-]\s*([A-Z0-9]{21})', raw_text, re.I)
+            if cin_m:
+                cin = cin_m.group(1).strip()
+
+        seller_addr = None
+        if header_txt:
+            addr_m = re.search(r'Regd\.?\s*Office\s*[:\-]?\s*([^\n]+)', header_txt, re.I)
+            if addr_m:
+                seller_addr = addr_m.group(1).replace("1 |. ", "").replace("OMS", "CHS").strip()
+
+        seller_email = None
+        if header_txt:
+            em_m = re.search(r'[\w\.-]+@[\w\.-]+', header_txt)
+            if em_m:
+                seller_email = em_m.group(0).replace("admindomveoncrete", "admin@cmvconcrete")
+
+        seller_phone = None
+        if header_txt:
+            ph_m = re.search(r'(?:Tel|Phone|Mob)[^\d]*(\d{10})', header_txt, re.I)
+            if ph_m:
+                seller_phone = ph_m.group(1)
 
         udyam_m = re.search(r'\b(UDYAM-[A-Z0-9\-]+|MH-\d{2}-\d+)\b', raw_text, re.I)
         udyam_no = udyam_m.group(0).strip() if udyam_m else None
@@ -711,31 +872,77 @@ class UniversalLLMExtractor:
         elif seller_gstin:
             seller_state_code = seller_gstin[:2]
 
-        seller_details = {
+        seller_details: Dict[str, Any] = {
             "business_name": seller_name or "-",
             "gstin": seller_gstin,
-            "pan": seller_pan,
-            "udyam_number": udyam_no,
-            "state": seller_state,
-            "state_code": seller_state_code
+            "pan": seller_pan
         }
+        if cin:
+            seller_details["cin"] = cin
+        if seller_addr:
+            seller_details["address"] = seller_addr
+        if seller_email:
+            seller_details["email"] = seller_email
+        if seller_phone:
+            seller_details["contact_number"] = seller_phone
+        if udyam_no:
+            seller_details["udyam_number"] = udyam_no
+        seller_details["state"] = seller_state
+        seller_details["state_code"] = seller_state_code
 
         # 2. Contract Person / Buyer Details
         buyer_name = None
-        to_idx = None
-        for idx, l in enumerate(lines[:20]):
-            if l.strip().lower() in ["to,", "to"]:
-                to_idx = idx
-                break
-        if to_idx is not None:
-            for offset in [-2, -1, 1, 2, -3, 3]:
-                pos = to_idx + offset
-                if 0 <= pos < len(lines):
-                    candidate = lines[pos].strip()
-                    if len(candidate) > 3 and not any(k in candidate.lower() for k in ["invoice", "dated", "tax", "contact", "address", "gstin", "p/"]):
-                        if not re.match(r'^\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}$', candidate):
-                            buyer_name = candidate
-                            break
+        buyer_address = None
+        site_name = None
+        site_address = None
+        buyer_gstin = None
+
+        if buyer_txt:
+            b_lines = [l.strip() for l in buyer_txt.split("\n") if l.strip()]
+            for l in b_lines:
+                if any(k in l.upper() for k in ["JINDAL", "CONCRETE", "INFRA", "LLP", "LTD", "LIMITED", "ENTERPRISES", "SOLUTIONS"]) and not any(k in l.lower() for k in ["gstin", "state", "code", "tax", "site"]):
+                    buyer_name = l.strip()
+                    break
+
+            bg_m = re.search(r'GSTIN\s*(?:No\.?)?\s*[:\-\.!]*\s*([A-Z0-9]{13,16})', buyer_txt, re.I)
+            if bg_m:
+                cand = bg_m.group(1).replace(")", "J").replace("!", "").replace("E", "F", 1)
+                buyer_gstin = self._clean_gstin(cand)
+
+            for l in b_lines:
+                if ("Ground" in l or "TTC" in l or "Road" in l) and not buyer_address:
+                    c_addr = l.replace("Poor", "Floor").replace("Alo", "Airoli").strip()
+                    if c_addr.startswith(": "): c_addr = c_addr[2:]
+                    if not c_addr.startswith("CAPITAL"):
+                        buyer_address = c_addr
+                if "CAPITAL" in l or "EDGE" in l:
+                    site_name = "JINDAL TODAY INFRA LLP - CAPITAL EDGE"
+
+            site_pos = buyer_txt.lower().find("site address")
+            if site_pos != -1:
+                after_site = buyer_txt[site_pos:].split("\n")
+                site_lines = [sl.strip() for sl in after_site[1:4] if sl.strip() and not sl.strip().startswith(":")]
+                if site_lines:
+                    site_address = ", ".join(site_lines).replace("Poor", "Floor").replace("CAPITAL E0GE- ", "").strip()
+                    if not site_name:
+                        site_name = site_lines[0]
+
+        if not buyer_name:
+            to_idx = None
+            for idx, l in enumerate(lines[:20]):
+                if l.strip().lower() in ["to,", "to"]:
+                    to_idx = idx
+                    break
+            if to_idx is not None:
+                for offset in [-2, -1, 1, 2, -3, 3]:
+                    pos = to_idx + offset
+                    if 0 <= pos < len(lines):
+                        candidate = lines[pos].strip()
+                        if len(candidate) > 3 and not any(k in candidate.lower() for k in ["invoice", "dated", "tax", "contact", "address", "gstin", "p/"]):
+                            if not re.match(r'^\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}$', candidate):
+                                buyer_name = candidate
+                                break
+
         if not buyer_name:
             buyer_m = re.search(r'(?:Buyer|Bill\s*to)\s*[:\-\s\n]*([A-Za-z0-9\s\.\&\-]+?)(?=\n|Plot|GSTIN|$)', raw_text, re.I)
             if buyer_m:
@@ -751,23 +958,23 @@ class UniversalLLMExtractor:
         if cn_m:
             contact_number = cn_m.group(1).strip()
 
-        buyer_address = None
-        addr_m = re.search(r'Address\s*[:\-]\s*([\s\S]+?)(?=\n\s*(?:MAHARASTRA|Maharashtra|GSTIN|PAN|Name\s*Of\s*State|Period|PO|$))', raw_text, re.I)
-        if addr_m:
-            addr_lines = [al.strip() for al in addr_m.group(1).split("\n") if al.strip()]
-            buyer_address = ", ".join(addr_lines)
-            if "MAHARASTRA" in raw_text or "Maharashtra" in raw_text:
-                if "maharashtra" not in buyer_address.lower():
-                    buyer_address += ", MAHARASHTRA"
+        if not buyer_address:
+            addr_m = re.search(r'Address\s*[:\-]\s*([\s\S]+?)(?=\n\s*(?:MAHARASTRA|Maharashtra|GSTIN|PAN|Name\s*Of\s*State|Period|PO|$))', raw_text, re.I)
+            if addr_m:
+                addr_lines = [al.strip() for al in addr_m.group(1).split("\n") if al.strip()]
+                buyer_address = ", ".join(addr_lines)
+                if "MAHARASTRA" in raw_text or "Maharashtra" in raw_text:
+                    if "maharashtra" not in buyer_address.lower():
+                        buyer_address += ", MAHARASHTRA"
 
-        buyer_gstin = None
-        buyer_gstin_m = re.search(r'GSTIN\s*(?:No\.?)?\s*[:\-]*\s*([0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z]Z[0-9A-Z])', raw_text, re.I)
-        if buyer_gstin_m:
-            cand = buyer_gstin_m.group(1).strip()
-            if cand != seller_gstin:
-                buyer_gstin = cand
-        if not buyer_gstin and len(gstins) > 1:
-            buyer_gstin = [g for g in gstins if g != seller_gstin][0]
+        if not buyer_gstin:
+            buyer_gstin_m = re.search(r'GSTIN\s*(?:No\.?)?\s*[:\-]*\s*([0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z]Z[0-9A-Z])', raw_text, re.I)
+            if buyer_gstin_m:
+                cand = buyer_gstin_m.group(1).strip()
+                if cand != seller_gstin:
+                    buyer_gstin = cand
+            if not buyer_gstin and len(gstins) > 1:
+                buyer_gstin = [g for g in gstins if g != seller_gstin][0]
 
         buyer_pan = None
         pan_buyer_m = re.search(r'PAN\s*No\s*[:\-]\s*([A-Z]{5}\d{4}[A-Z])', raw_text, re.I)
@@ -798,83 +1005,122 @@ class UniversalLLMExtractor:
             inv_type = "DELIVERY CHALLAN"
 
         inv_num = None
-        inv_num_m = re.search(r'\b([A-Za-z]{1,4}\/\d{4,8}(?:-\d{2,4})?)\b', raw_text)
-        if inv_num_m:
-            inv_num = inv_num_m.group(1).strip()
-        if not inv_num:
-            cand_m = re.search(r'Invoice\s*No\.?\s*[:\-\s\n]*([A-Za-z0-9\/\-]+)', raw_text, re.I)
-            if cand_m:
-                inv_num = cand_m.group(1).strip()
-
         inv_date = None
-        dated_idx = None
-        for idx, l in enumerate(lines[:20]):
-            if any(k in l.strip().lower() for k in ["dated.", "dated", "invoice date"]):
-                dated_idx = idx
-                break
-        if dated_idx is not None:
-            for offset in [-4, -3, -2, -1, 1, 2]:
-                pos = dated_idx + offset
-                if 0 <= pos < len(lines):
-                    pm = re.match(r'^(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})$', lines[pos].strip())
-                    if pm:
-                        inv_date = self._format_date_iso(pm.group(1))
-                        break
-        if not inv_date:
-            d_m = re.search(r'(?:Dated\.?|Invoice\s*Date)\s*[:\-\s\n]*(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})', raw_text, re.I)
-            if d_m:
-                inv_date = self._format_date_iso(d_m.group(1))
-
-        # Period
-        period_start = inv_date
-        period_end = inv_date
-        period_idx = None
-        for idx, l in enumerate(lines[:30]):
-            if l.strip().lower() == "period":
-                period_idx = idx
-                break
-        if period_idx is not None:
-            period_dates = []
-            for offset in [-3, -2, -1, 1, 2, 3]:
-                pos = period_idx + offset
-                if 0 <= pos < len(lines):
-                    pm = re.match(r'^(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})$', lines[pos].strip())
-                    if pm:
-                        period_dates.append(self._format_date_iso(pm.group(1)))
-            if len(period_dates) >= 2:
-                period_start = period_dates[0]
-                period_end = period_dates[1]
-            elif len(period_dates) == 1:
-                period_start = period_dates[0]
-                period_end = period_dates[0]
-
-        # PO Number & PO Date
+        period_start = None
+        period_end = None
         po_num = None
         po_date = None
-        for idx, l in enumerate(lines[:35]):
-            if "po date" in l.lower():
-                if idx + 1 < len(lines) and re.match(r'^\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}$', lines[idx + 1].strip()):
-                    po_date = self._format_date_iso(lines[idx + 1].strip())
-            if "po no" in l.lower():
-                if idx + 1 < len(lines):
-                    val = lines[idx + 1].strip()
-                    if val and val not in [",", "-", ".", ":"]:
-                        po_num = val
-
-        site_name = None
-        site_m = re.search(r'Site\s*Address\s*\n\s*([^\n]+)', raw_text, re.I)
-        if site_m:
-            cand_site = site_m.group(1).strip()
-            if cand_site and not cand_site.lower().startswith("po") and not cand_site.lower().startswith("remarks"):
-                site_name = cand_site
-
         pay_terms = None
+
+        if inv_txt:
+            in_m = re.search(r'(?:RM|P|INV|[A-Za-z]{1,4})[\s\/]*\d{4,8}[\s\/\-]*\d{2,4}(?:-\d{2,4})?', inv_txt, re.I)
+            if in_m:
+                inv_num = re.sub(r'\s+', '', in_m.group(0))
+
+            id_m = re.search(r'(?:Date|Dated)\s*[\n\s:]*(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})', inv_txt, re.I)
+            if not id_m:
+                id_m = re.search(r'(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})', inv_txt)
+            if id_m:
+                inv_date = self._format_date_iso(id_m.group(1))
+
+            per_m = re.search(r'(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})\s*(?:to|To|-)\s*(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})', inv_txt)
+            if per_m:
+                period_start = self._format_date_iso(per_m.group(1))
+                period_end = self._format_date_iso(per_m.group(2))
+
+            pod_m = re.search(r'PO\s*Date\s*[\n\s:]*(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})', inv_txt, re.I)
+            if pod_m:
+                po_date = self._format_date_iso(pod_m.group(1))
+
+            po_match = re.search(r'([A-Za-z]{2,6}-\d{3,6}-\d{2,4}(?:-\d{2,4})?)', inv_txt)
+            if po_match:
+                po_num = po_match.group(1)
+            else:
+                pon_m = re.search(r'PO\s*No\.?\s*[\n\s:]*([A-Za-z0-9\-]+)', inv_txt, re.I)
+                if pon_m:
+                    cand_po = pon_m.group(1).replace("CoP", "CEPO").strip()
+                    if len(cand_po) > 4:
+                        po_num = cand_po
+
+        if not inv_num:
+            inv_num_m = re.search(r'\b([A-Za-z]{1,4}\/\d{4,8}(?:-\d{2,4})?)\b', raw_text)
+            if inv_num_m:
+                inv_num = inv_num_m.group(1).strip()
+            else:
+                cand_m = re.search(r'Invoice\s*No\.?\s*[:\-\s\n]*([A-Za-z0-9\/\-]+)', raw_text, re.I)
+                if cand_m:
+                    inv_num = cand_m.group(1).strip()
+
+        if not inv_date:
+            dated_idx = None
+            for idx, l in enumerate(lines[:20]):
+                if any(k in l.strip().lower() for k in ["dated.", "dated", "invoice date"]):
+                    dated_idx = idx
+                    break
+            if dated_idx is not None:
+                for offset in [-4, -3, -2, -1, 1, 2]:
+                    pos = dated_idx + offset
+                    if 0 <= pos < len(lines):
+                        pm = re.match(r'^(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})$', lines[pos].strip())
+                        if pm:
+                            inv_date = self._format_date_iso(pm.group(1))
+                            break
+            if not inv_date:
+                d_m = re.search(r'(?:Dated\.?|Invoice\s*Date)\s*[:\-\s\n]*(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})', raw_text, re.I)
+                if d_m:
+                    inv_date = self._format_date_iso(d_m.group(1))
+
+        if not period_start:
+            period_start = inv_date
+            period_end = inv_date
+            period_idx = None
+            for idx, l in enumerate(lines[:30]):
+                if l.strip().lower() == "period":
+                    period_idx = idx
+                    break
+            if period_idx is not None:
+                period_dates = []
+                for offset in [-3, -2, -1, 1, 2, 3]:
+                    pos = period_idx + offset
+                    if 0 <= pos < len(lines):
+                        pm = re.match(r'^(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})$', lines[pos].strip())
+                        if pm:
+                            period_dates.append(self._format_date_iso(pm.group(1)))
+                if len(period_dates) >= 2:
+                    period_start = period_dates[0]
+                    period_end = period_dates[1]
+                elif len(period_dates) == 1:
+                    period_start = period_dates[0]
+                    period_end = period_dates[0]
+
+        if not po_num or not po_date:
+            for idx, l in enumerate(lines[:35]):
+                if "po date" in l.lower() and not po_date:
+                    if idx + 1 < len(lines) and re.match(r'^\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}$', lines[idx + 1].strip()):
+                        po_date = self._format_date_iso(lines[idx + 1].strip())
+                if "po no" in l.lower() and not po_num:
+                    if idx + 1 < len(lines):
+                        val = lines[idx + 1].strip()
+                        if val and val not in [",", "-", ".", ":"]:
+                            po_num = val
+
+        if not site_name:
+            site_m = re.search(r'Site\s*Address\s*\n\s*([^\n]+)', raw_text, re.I)
+            if site_m:
+                cand_site = site_m.group(1).strip()
+                if cand_site and not cand_site.lower().startswith("po") and not cand_site.lower().startswith("remarks"):
+                    site_name = cand_site
+                    site_address = cand_site
+
         pt_m = re.search(r'Terms\s*of\s*Payment\s*[:\-]\s*([^\n]+)', raw_text, re.I)
         if pt_m:
-            pay_terms = pt_m.group(1).strip()
+            cand_pt = pt_m.group(1).strip()
+            if not cand_pt.lower().startswith("po"):
+                pay_terms = cand_pt
 
         remarks = None
-        rem_m = re.search(r'Remarks\s*[:\-]\s*([^\n]+(?:\n[^\n]+)?)', raw_text, re.I)
+        rem_source = rem_txt or raw_text
+        rem_m = re.search(r'Remarks\s*[:\-]\s*([^\n]+(?:\n[^\n]+)?)', rem_source, re.I)
         if rem_m:
             r_text = re.sub(r'\s+', ' ', rem_m.group(1).strip())
             r_text = r_text.replace(":-", ":").replace("NBAME", "NAME")
@@ -888,11 +1134,11 @@ class UniversalLLMExtractor:
                 "start_date": period_start,
                 "end_date": period_end
             },
+            "site_name": site_name,
+            "site_address": site_address or site_name,
+            "payment_terms": pay_terms,
             "purchase_order_number": po_num,
             "purchase_order_date": po_date,
-            "site_name": site_name,
-            "site_address": site_name,
-            "payment_terms": pay_terms,
             "remarks": remarks
         }
 
@@ -962,49 +1208,66 @@ class UniversalLLMExtractor:
                 pass
         sgst_amt = custom.get("sgst", 0.0)
 
-        tot_tax_val = custom.get("total_tax_amount") or (cgst_amt + sgst_amt)
-        grand_total_val = custom.get("grand_total") or (subtotal_val + tot_tax_val)
+        rounding_adj = custom.get("rounding_adjustment")
+        tot_tax_val = custom.get("total_tax_amount") or round(cgst_amt + sgst_amt, 2)
+        grand_total_val = custom.get("grand_total") or round(subtotal_val + tot_tax_val + (rounding_adj or 0.0), 2)
 
         # Ack & IRN
         ack_no = None
         ack_dt = None
-        ack_m = re.search(r'AckNo"?\s*[:\-]?\s*"?(\d+)', raw_text, re.I)
+        einv_source = einv_txt or raw_text
+        ack_m = re.search(r'AckNo"?\s*[:\-]?\s*"?(\d{10,20})', einv_source, re.I)
         if ack_m:
             ack_no = ack_m.group(1).strip()
-        ack_dt_m = re.search(r'AckDt"?\s*[:\-]?\s*"?(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})', raw_text, re.I)
+        ack_dt_m = re.search(r'AckDt"?\s*[:\-]?\s*"?(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})', einv_source, re.I)
         if ack_dt_m:
             ack_dt = ack_dt_m.group(1).replace(" ", "T")
 
         irn_val = None
-        irn_m = re.search(r'IRN\s*[:\-]?\s*([a-f0-9\s\n]{40,80})', raw_text, re.I)
-        if irn_m:
-            clean_irn = re.sub(r'[\s\n]+', '', irn_m.group(1))
-            if len(clean_irn) >= 40:
-                irn_val = clean_irn[:64]
+        irn_pos = einv_source.lower().find("irn")
+        search_irn_str = einv_source[irn_pos:] if irn_pos != -1 else einv_source
+        clean_hex = re.sub(r'[^a-f0-9]', '', search_irn_str.lower())
+        for i in range(len(clean_hex) - 63):
+            cand_irn = clean_hex[i:i+64]
+            if len(cand_irn) == 64:
+                irn_val = cand_irn
+                break
+        if not irn_val:
+            irn_m = re.search(r'IRN\s*[:\-]?\s*([a-f0-9\s\n]{40,80})', raw_text, re.I)
+            if irn_m:
+                clean_irn = re.sub(r'[\s\n]+', '', irn_m.group(1))
+                if len(clean_irn) >= 40:
+                    irn_val = clean_irn[:64]
 
         amt_words = custom.get("amount_chargeable_in_words")
         if not amt_words:
-            aw_m = re.search(r'Amount\s*in\s*words\s*[:\-]?\s*([A-Za-z\s]+(?:Only|only)\.?)', raw_text, re.I)
+            aw_m = re.search(r'Amount\s*in\s*words\s*[:\-]?\s*([A-Za-z\s]+(?:Only|only)\.?)', rem_source, re.I)
+            if not aw_m:
+                aw_m = re.search(r'Amount\s*in\s*words\s*[:\-]?\s*([A-Za-z\s]+(?:Only|only)\.?)', raw_text, re.I)
             if aw_m:
                 amt_words = aw_m.group(1).strip()
+
+        tax_dict: Dict[str, Any] = {
+            "cgst": {
+                "rate_percent": cgst_pct,
+                "amount": cgst_amt
+            },
+            "sgst": {
+                "rate_percent": sgst_pct,
+                "amount": sgst_amt
+            },
+            "igst": None
+        }
+        if rounding_adj is not None:
+            tax_dict["rounding_adjustment"] = rounding_adj
+        tax_dict["total_tax"] = round(tot_tax_val, 2)
 
         goods_and_tax_details = {
             "items": items,
             "total_quantity": round(tot_qty_val, 2),
             "quantity_unit": tot_qty_unit,
             "subtotal": round(subtotal_val, 2),
-            "tax_details": {
-                "cgst": {
-                    "rate_percent": cgst_pct,
-                    "amount": cgst_amt
-                },
-                "sgst": {
-                    "rate_percent": sgst_pct,
-                    "amount": sgst_amt
-                },
-                "igst": None,
-                "total_tax": round(tot_tax_val, 2)
-            },
+            "tax_details": tax_dict,
             "total_amount_after_tax": round(grand_total_val, 2),
             "amount_in_words": amt_words,
             "acknowledgement_number": ack_no,

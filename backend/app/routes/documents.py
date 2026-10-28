@@ -111,10 +111,13 @@ async def reprocess_document(document_id: str):
     page_count = extraction_result["page_count"]
     detected_tables = extraction_result["tables"]
 
+    layout_regions = extraction_result.get("layout_regions")
+
     extracted_data, llm_meta = await universal_llm_extractor.extract_structured_json(
         raw_text=raw_text,
         detected_tables=detected_tables,
-        filename=doc["filename"]
+        filename=doc["filename"],
+        layout_regions=layout_regions
     )
 
     detected_type = extracted_data.get("document_type", "generic_document")

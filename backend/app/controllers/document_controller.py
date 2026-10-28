@@ -69,11 +69,14 @@ class DocumentController:
             page_count = extraction_result["page_count"]
             detected_tables = extraction_result["tables"]
 
+            layout_regions = extraction_result.get("layout_regions")
+
             # 5. Structured JSON Extraction (Open-weight LLM or Heuristic Fallback)
             extracted_data, llm_meta = await universal_llm_extractor.extract_structured_json(
                 raw_text=raw_text,
                 detected_tables=detected_tables,
-                filename=sanitized_filename
+                filename=sanitized_filename,
+                layout_regions=layout_regions
             )
 
             # 6. Compose Universal JSON Output
