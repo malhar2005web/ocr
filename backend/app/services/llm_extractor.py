@@ -1176,7 +1176,7 @@ class UniversalLLMExtractor:
 
         remarks = None
         rem_source = rem_txt or raw_text
-        rem_m = re.search(r'Remarks\s*[:\-]\s*([\s\S]+?)(?=\n\s*(?:Declaration|Terms|Our\s*Bank|$))', rem_source, re.I)
+        rem_m = re.search(r'Remarks\s*[:\-]\s*([\s\S]+?)(?=\n\s*(?:Declaration|Deciaration|Terms|Our\s*Bank|$))', rem_source, re.I)
         if rem_m:
             raw_rem = rem_m.group(1).strip()
             clean_lines = [re.sub(r'\s+', ' ', l).strip() for l in raw_rem.splitlines() if l.strip() and not l.strip().startswith("E. &") and not l.strip().startswith("E.&")]
@@ -1271,23 +1271,31 @@ class UniversalLLMExtractor:
         # Ack & IRN
         ack_no = None
         ack_dt = None
-        einv_source = einv_txt or raw_text
-        ack_m = re.search(r'AckNo"?\s*[:\-]?\s*"?(\d{10,20})', einv_source, re.I)
+        combined_einv = ((einv_txt or "") + "\n" + raw_text)
+        ack_m = re.search(r'AckNo"?\s*[:\-]?\s*"?(\d{10,20})', combined_einv, re.I)
+        if not ack_m:
+            ack_m = re.search(r'ACK\s*No\.?\s*[:\-]?\s*"?(\d{10,20})', combined_einv, re.I)
         if ack_m:
             ack_no = ack_m.group(1).strip()
-        ack_dt_m = re.search(r'AckDt"?\s*[:\-]?\s*"?(\d{4}-\d{2}-\d{2}[\s\nT]+\d{2}:\d{2}:\d{2})', einv_source, re.I)
+        ack_dt_m = re.search(r'AckDt"?\s*[:\-]?\s*"?(\d{4}-\d{2}-\d{2}[\s\nT]+\d{2}:\d{2}:\d{2})', combined_einv, re.I)
         if ack_dt_m:
             ack_dt = re.sub(r'[\s\n]+', 'T', ack_dt_m.group(1).strip())
 
         irn_val = None
-        irn_pos = einv_source.lower().find("irn")
-        search_irn_str = einv_source[irn_pos:] if irn_pos != -1 else einv_source
+        irn_pos = combined_einv.lower().find("irn")
+        search_irn_str = combined_einv[irn_pos:] if irn_pos != -1 else combined_einv
         clean_hex = re.sub(r'[^a-f0-9]', '', search_irn_str.lower())
         for i in range(len(clean_hex) - 63):
             cand_irn = clean_hex[i:i+64]
             if len(cand_irn) == 64:
                 irn_val = cand_irn
                 break
+        if not irn_val:
+            irn_m = re.search(r'IRN\s*[:\-]?\s*([a-f0-9\s\n]{40,80})', raw_text, re.I)
+            if irn_m:
+                clean_irn = re.sub(r'[\s\n]+', '', irn_m.group(1))
+                if len(clean_irn) >= 40:
+                    irn_val = clean_irn[:64]
         if not irn_val:
             irn_m = re.search(r'IRN\s*[:\-]?\s*([a-f0-9\s\n]{40,80})', raw_text, re.I)
             if irn_m:
