@@ -9,6 +9,18 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+GST_STATE_MAP: Dict[str, str] = {
+    "01": "Jammu and Kashmir", "02": "Himachal Pradesh", "03": "Punjab", "04": "Chandigarh",
+    "05": "Uttarakhand", "06": "Haryana", "07": "Delhi", "08": "Rajasthan", "09": "Uttar Pradesh",
+    "10": "Bihar", "11": "Sikkim", "12": "Arunachal Pradesh", "13": "Nagaland", "14": "Manipur",
+    "15": "Mizoram", "16": "Tripura", "17": "Meghalaya", "18": "Assam", "19": "West Bengal",
+    "20": "Jharkhand", "21": "Odisha", "22": "Chhattisgarh", "23": "Madhya Pradesh", "24": "Gujarat",
+    "26": "Dadra & Nagar Haveli and Daman & Diu", "27": "Maharashtra", "29": "Karnataka", "30": "Goa",
+    "31": "Lakshadweep", "32": "Kerala", "33": "Tamil Nadu", "34": "Puducherry",
+    "35": "Andaman and Nicobar Islands", "36": "Telangana", "37": "Andhra Pradesh", "38": "Ladakh",
+    "97": "Other Territory"
+}
+
 EXTRACTION_SYSTEM_PROMPT = """You are a world-class Universal Document Intelligence Engine.
 Your task is to analyze document text and layout, identify its document type, and extract all structured information into the exact JSON schema provided below.
 
@@ -532,10 +544,15 @@ Audit the candidate data against the document text. Return JSON with audit_statu
             for t in detected_tables:
                 headers = [str(h or "").lower() for h in t.get("headers", [])]
                 if any(k in " ".join(headers) for k in ["description", "item", "particulars", "hsn", "rate", "amount"]):
+                    valid_table_rows = []
                     for r in t.get("rows", []):
-                        clean_row = {k: v for k, v in r.items() if v and v != "None"}
-                        if clean_row:
-                            goods_rows.append(clean_row)
+                        desc = str(r.get("Description of Goods") or r.get("Description") or r.get("Item") or "").strip()
+                        amt = str(r.get("Amount") or "").strip()
+                        if desc or (amt and amt not in ["-", "0", "0.0", "0.00"]):
+                            clean_row = {k: v for k, v in r.items() if v and v != "None"}
+                            valid_table_rows.append(clean_row)
+                    if any(str(r.get("Description of Goods") or r.get("Description") or r.get("Item") or "").strip() for r in valid_table_rows):
+                        goods_rows.extend(valid_table_rows)
 
         # 2. If layout_regions provided (image pipeline), extract from goods_table region
         if not goods_rows and layout_regions and layout_regions.get("goods_table"):
@@ -1109,16 +1126,14 @@ Audit the candidate data against the document text. Return JSON with audit_statu
         if header_txt:
             h_lines = [l.strip() for l in header_txt.split("\n") if l.strip()]
             for l in h_lines:
-                if any(k in l.upper() for k in ["PVT LTD", "LIMITED", "ENTERPRISES", "SOLUTIONS", "CONCRETE", "INFRA", "INFRAPROJECTS"]):
+                if any(k in l.upper() for k in ["PVT", "LTD", "LIMITED", "LLP", "ENTERPRISES", "TRADERS", "INDUSTRIES", "CORP", "CORPORATION", "SERVICES", "COMPANY", "CO.", "AGENCY", "FIRM", "ASSOCIATES", "WORKS", "COMMERCIAL"]):
                     cand = re.sub(r'^[^\w]+', '', l).strip()
                     cand = re.sub(r'\s+[A-Z]$', '', cand).strip()
-                    if "Infraproiects" in cand:
-                        cand = cand.replace("Infraproiects", "Infraprojects")
                     seller_name = cand
                     break
 
         if not seller_name:
-            einv_seller_m = re.search(r'e-Invoice\s*\n\s*([A-Za-z0-9\s\.\&\,\-\(\)]+?)(?=\n\s*(?:Mani|Plot|Sector|Room|Bhuvan|Bldg|Building|Floor|Flr|Flat|Shop|Road|Gala|GSTIN|State|$))', raw_text, re.I)
+            einv_seller_m = re.search(r'e-Invoice\s*\n\s*([A-Za-z0-9\s\.\&\,\-\(\)]+?)(?=\n\s*(?:Plot|Sector|Room|Bldg|Building|Floor|Flr|Flat|Shop|Road|Gala|Lane|Street|Nagar|Colony|Industrial|Estate|Phase|S\.?No|Survey|H\.?No|GSTIN|State|Code|$))', raw_text, re.I)
             if einv_seller_m:
                 cand = einv_seller_m.group(1).strip()
                 if len(cand) > 3 and not any(k in cand.lower() for k in ["tax invoice", "irn", "ack"]):
@@ -1203,14 +1218,10 @@ Audit the candidate data against the document text. Return JSON with audit_statu
                         seller_addr = ", ".join(addr_lines)
 
         seller_email = None
-        if header_txt:
-            em_m = re.search(r'[\w\.-]+@[\w\.-]+', header_txt)
-            if em_m:
-                seller_email = em_m.group(0).replace("admindomveoncrete", "admin@cmvconcrete")
-        if not seller_email:
-            em_m = re.search(r'[\w\.-]+@[\w\.-]+', raw_text)
-            if em_m:
-                seller_email = em_m.group(0).replace("admindomveoncrete", "admin@cmvconcrete")
+        email_source = (header_txt or "") + "\n" + raw_text
+        em_m = re.search(r'\b([a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)\b', email_source)
+        if em_m:
+            seller_email = em_m.group(1).strip().rstrip(".,;")
 
         seller_phone = None
         if header_txt:
@@ -1227,16 +1238,22 @@ Audit the candidate data against the document text. Return JSON with audit_statu
         if udyam_no and not udyam_no.startswith("UDYAM-"):
             udyam_no = f"UDYAM-{udyam_no}"
 
-        seller_state = "Maharashtra"
-        seller_state_code = "27"
-        state_m = re.search(r'(?:State\s*Name|Name\s*Of\s*State)\s*[:\-]\s*([A-Za-z]+)', raw_text, re.I)
+        seller_state = None
+        seller_state_code = None
+        state_m = re.search(r'(?:State\s*Name|Name\s*Of\s*State)\s*[:\-]\s*([A-Za-z\s]+?)(?:,|$|\n)', raw_text, re.I)
         if state_m:
             seller_state = state_m.group(1).strip()
         code_m = re.search(r'(?:Sate|State)\s*Code\s*[:\-]\s*(\d{2})', raw_text, re.I)
         if code_m:
             seller_state_code = code_m.group(1).strip()
-        elif seller_gstin:
+        elif seller_gstin and len(seller_gstin) >= 2 and seller_gstin[:2].isdigit():
             seller_state_code = seller_gstin[:2]
+
+        if not seller_state and seller_state_code:
+            seller_state = GST_STATE_MAP.get(seller_state_code, "Maharashtra")
+        if not seller_state:
+            seller_state = "Maharashtra"
+            seller_state_code = "27"
 
         seller_details: Dict[str, Any] = {
             "business_name": seller_name or "-",
@@ -1263,31 +1280,35 @@ Audit the candidate data against the document text. Return JSON with audit_statu
         if buyer_txt:
             b_lines = [l.strip() for l in buyer_txt.split("\n") if l.strip()]
             for l in b_lines:
-                if any(k in l.upper() for k in ["JINDAL", "CONCRETE", "INFRA", "LLP", "LTD", "LIMITED", "ENTERPRISES", "SOLUTIONS"]) and not any(k in l.lower() for k in ["gstin", "state", "code", "tax", "site"]):
-                    buyer_name = l.strip()
-                    break
+                if not any(k in l.lower() for k in ["gstin", "state", "code", "tax", "site address", "buyer", "bill to", "invoice"]):
+                    if len(l) > 3 and not re.match(r'^\d+$', l):
+                        buyer_name = l.strip()
+                        break
 
             bg_m = re.search(r'GST[A-Z\s]*NO\.?\s*[:\-\.!]*\s*([A-Z0-9\(\)\!]{13,17})', buyer_txt, re.I)
             if bg_m:
                 buyer_gstin = self._clean_gstin(bg_m.group(1))
 
+            addr_parts = []
+            capturing_addr = False
             for l in b_lines:
-                if ("Ground" in l or "TTC" in l or "Road" in l) and not buyer_address:
-                    c_addr = l.replace("Poor", "Floor").replace("Alo", "Airoli").strip()
-                    if c_addr.startswith(": "): c_addr = c_addr[2:]
-                    if not c_addr.startswith("CAPITAL"):
-                        buyer_address = c_addr
-                if "CAPITAL" in l or "EDGE" in l:
-                    site_name = "JINDAL TODAY INFRA LLP - CAPITAL EDGE"
+                if buyer_name and l == buyer_name:
+                    capturing_addr = True
+                    continue
+                if capturing_addr:
+                    if any(k in l.lower() for k in ["site address", "gstin", "state", "code", "pan"]):
+                        break
+                    addr_parts.append(l.strip(": "))
+            if addr_parts and not buyer_address:
+                buyer_address = ", ".join(addr_parts)
 
             site_pos = buyer_txt.lower().find("site address")
             if site_pos != -1:
                 after_site = buyer_txt[site_pos:].split("\n")
-                site_lines = [sl.strip() for sl in after_site[1:4] if sl.strip() and not sl.strip().startswith(":")]
+                site_lines = [sl.strip(": ") for sl in after_site[1:4] if sl.strip() and not any(k in sl.lower() for k in ["gstin", "pan", "state", "po"])]
                 if site_lines:
-                    site_address = ", ".join(site_lines).replace("Poor", "Floor").replace("CAPITAL E0GE- ", "").strip()
-                    if not site_name:
-                        site_name = site_lines[0]
+                    site_address = ", ".join(site_lines)
+                    site_name = site_lines[0]
 
         if not buyer_name:
             to_idx = None
@@ -1370,10 +1391,24 @@ Audit the candidate data against the document text. Return JSON with audit_statu
         elif buyer_gstin and len(buyer_gstin) >= 12:
             buyer_pan = buyer_gstin[2:12]
 
-        buyer_state = seller_state
-        buyer_state_code = seller_state_code
-        if buyer_gstin:
+        if buyer_name and "\n" in buyer_name:
+            b_parts = [l.strip() for l in buyer_name.splitlines() if l.strip()]
+            buyer_name = b_parts[0]
+            if len(b_parts) > 1 and not buyer_address:
+                buyer_address = ", ".join(b_parts[1:])
+
+        buyer_state = None
+        buyer_state_code = None
+        bs_m = re.search(r'Buyer[\s\S]+?State\s*Name\s*[:\-]\s*([A-Za-z\s]+?)(?:,|$|\n)', raw_text, re.I)
+        if bs_m:
+            buyer_state = bs_m.group(1).strip()
+        if buyer_gstin and len(buyer_gstin) >= 2 and buyer_gstin[:2].isdigit():
             buyer_state_code = buyer_gstin[:2]
+            if not buyer_state:
+                buyer_state = GST_STATE_MAP.get(buyer_state_code)
+        if not buyer_state:
+            buyer_state = seller_state
+            buyer_state_code = seller_state_code
 
         contract_person_details = {
             "company_name": buyer_name or "-",
@@ -1427,7 +1462,7 @@ Audit the candidate data against the document text. Return JSON with audit_statu
             else:
                 pon_m = re.search(r'PO\s*No\.?\s*[\n\s:]*([A-Za-z0-9\-]+)', inv_txt, re.I)
                 if pon_m:
-                    cand_po = pon_m.group(1).replace("CoP", "CEPO").strip()
+                    cand_po = pon_m.group(1).strip()
                     if len(cand_po) > 4:
                         po_num = cand_po
 
@@ -1685,28 +1720,51 @@ Audit the candidate data against the document text. Return JSON with audit_statu
         tot_qty_unit = items[0]["unit"] if items else "Mtr"
         subtotal_val = custom.get("taxable_value") or sum(it["amount"] for it in items)
 
-        cgst_pct = 2.5 if ("2.5" in raw_text or "2.50%" in raw_text) else 9.0
+        cgst_amt = custom.get("cgst", 0.0)
+        sgst_amt = custom.get("sgst", 0.0)
+        igst_amt = custom.get("igst")
+
+        # Mathematical and dynamic tax rate deduction
+        cgst_pct = None
         if custom.get("cgst_rate"):
             try:
                 cgst_pct = float(custom["cgst_rate"].replace("%", ""))
             except ValueError:
                 pass
-        cgst_amt = custom.get("cgst", 0.0)
+        if (cgst_pct is None or cgst_pct == 9.0) and subtotal_val > 0 and cgst_amt > 0:
+            calc_rate = round((cgst_amt / subtotal_val) * 100, 2)
+            if calc_rate > 0:
+                cgst_pct = calc_rate
+        if cgst_pct is None:
+            rt_m = re.search(r'(?:CGST|Central\s*Tax)[^\n%]*?(\d+(?:\.\d+)?)\s*%', raw_text, re.I)
+            if rt_m:
+                try:
+                    cgst_pct = float(rt_m.group(1))
+                except ValueError:
+                    pass
+        if cgst_pct is None:
+            cgst_pct = 9.0
 
-        sgst_pct = 2.5 if ("2.5" in raw_text or "2.50%" in raw_text) else 9.0
+        sgst_pct = None
         if custom.get("sgst_rate"):
             try:
                 sgst_pct = float(custom["sgst_rate"].replace("%", ""))
             except ValueError:
                 pass
-        sgst_amt = custom.get("sgst", 0.0)
+        if (sgst_pct is None or sgst_pct == 9.0) and subtotal_val > 0 and sgst_amt > 0:
+            calc_rate = round((sgst_amt / subtotal_val) * 100, 2)
+            if calc_rate > 0:
+                sgst_pct = calc_rate
+        if sgst_pct is None:
+            sgst_pct = cgst_pct
 
         rounding_adj = custom.get("rounding_adjustment")
         if rounding_adj is None:
-            ro_m = re.search(r'Round\s*Off\s*[:\-]?\s*([0-9\.\-]+)', raw_text, re.I)
+            ro_m = re.search(r'Round\s*Off\s*[:\-]?\s*(?:\(?\s*([\-]?)\s*\)?\s*([0-9\.]+))', raw_text, re.I)
             if ro_m:
                 try:
-                    rounding_adj = float(ro_m.group(1))
+                    sign = -1.0 if ("-" in ro_m.group(0) or "less" in raw_text[max(0, ro_m.start()-25):ro_m.start()].lower()) else 1.0
+                    rounding_adj = round(float(ro_m.group(2)) * sign, 2)
                 except ValueError:
                     pass
 
