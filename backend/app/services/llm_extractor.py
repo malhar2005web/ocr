@@ -176,23 +176,27 @@ class UniversalLLMExtractor:
         if layout_regions:
             for reg_name, reg_text in layout_regions.items():
                 if reg_text and reg_text.strip():
-                    regions_summary += f"\n--- REGION: {reg_name.upper()} ---\n{reg_text.strip()}\n"
+                    regions_summary += f"\n--- REGION: {reg_name.upper()} ---\n{reg_text.strip()[:600]}\n"
+
+        is_cpu_local = bool(self.base_url and ("localhost" in self.base_url or "127.0.0.1" in self.base_url))
+        max_raw = 4000 if is_cpu_local else 15000
+        compact_candidate = candidate_data.get("content", {}).get("custom_fields") or candidate_data
 
         user_content = f"""Document Filename: {filename}
 
 === GROUND TRUTH DOCUMENT TEXT (FROM TESSERACT OCR / PYMUPDF) ===
-{raw_text[:20000]}
+{raw_text[:max_raw]}
 """
         if regions_summary:
             user_content += f"""
 === SEGMENTED LAYOUT REGIONS ===
-{regions_summary[:10000]}
+{regions_summary[:3000]}
 """
         user_content += f"""
 === INITIAL CANDIDATE EXTRACTION JSON TO BE CROSS-VERIFIED & AUDITED ===
-{json.dumps(candidate_data, indent=2)}
+{json.dumps(compact_candidate, separators=(',', ':') if is_cpu_local else None, indent=None if is_cpu_local else 2)}
 
-Please audit, cross-verify, correct any OCR errors, reconcile line items and totals, and return the final verified JSON. Output ONLY pure raw JSON:"""
+Please audit, cross-verify, correct any OCR errors, reconcile line items and totals, and return the final verified JSON matching the exact schema. Output ONLY pure raw JSON:"""
 
         payload = {
             "model": self.model,

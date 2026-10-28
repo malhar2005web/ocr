@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     LLM_BASE_URL: Optional[str] = Field(default=None, description="OpenAI-compatible base URL (e.g., Groq, OpenRouter, Ollama, vLLM)")
     LLM_API_KEY: Optional[str] = Field(default=None, description="API Key for hosted inference")
     LLM_MODEL: str = Field(default="qwen-2.5-72b-instruct", description="Model name to use for extraction")
-    LLM_TIMEOUT: int = 90
+    LLM_TIMEOUT: int = 180
     
     # RAG Settings
     ENABLE_RAG: bool = True
