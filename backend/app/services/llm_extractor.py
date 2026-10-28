@@ -176,7 +176,7 @@ class UniversalLLMExtractor:
                     regions_summary += f"\n--- REGION: {reg_name.upper()} ---\n{reg_text.strip()[:600]}\n"
 
         is_cpu_local = bool(self.base_url and ("localhost" in self.base_url or "127.0.0.1" in self.base_url))
-        max_raw = 4000 if is_cpu_local else 15000
+        max_raw = 2000 if is_cpu_local else 15000
         compact_candidate = candidate_data.get("content", {}).get("custom_fields") or candidate_data
 
         user_content = f"""Document Filename: {filename}
@@ -184,7 +184,7 @@ class UniversalLLMExtractor:
 === GROUND TRUTH DOCUMENT TEXT (FROM TESSERACT OCR / PYMUPDF) ===
 {raw_text[:max_raw]}
 """
-        if regions_summary:
+        if regions_summary and not is_cpu_local:
             user_content += f"""
 === SEGMENTED LAYOUT REGIONS ===
 {regions_summary[:3000]}
