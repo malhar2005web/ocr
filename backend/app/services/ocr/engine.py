@@ -170,8 +170,8 @@ class TesseractOCREngine(BaseOCREngine):
             table_bot_divs = [d for d in dividers if 0.46 * h <= d <= 0.60 * h]
             table_bot_y = table_bot_divs[-1] if table_bot_divs else int(0.55 * h)
 
-            einv_bot_divs = [d for d in dividers if 0.64 * h <= d <= 0.76 * h]
-            einv_bot_y = einv_bot_divs[-1] if einv_bot_divs else int(0.70 * h)
+            einv_bot_divs = [d for d in dividers if 0.63 * h <= d <= 0.72 * h]
+            einv_bot_y = einv_bot_divs[0] if einv_bot_divs else int(0.66 * h)
 
             bank_top_divs = [d for d in dividers if 0.80 * h <= d <= 0.92 * h]
             bank_top_y = bank_top_divs[-1] if bank_top_divs else int(0.85 * h)

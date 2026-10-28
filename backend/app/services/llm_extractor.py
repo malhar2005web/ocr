@@ -760,17 +760,18 @@ class UniversalLLMExtractor:
 
         return tables, custom, extra_kv
 
-    def _clean_gstin(self, val: Optional[str]) -> Optional[str]:
+    def _clean_gstin(self, val: Optional[str], pan: Optional[str] = None) -> Optional[str]:
         if not val:
             return None
-        v = re.sub(r'[^A-Z0-9\(\)\]\[]', '', val.upper())
+        v = re.sub(r'[^A-Z0-9\(\)\]\[\{\}\?]', '', val.upper())
         if len(v) >= 15:
             s = list(v[:15])
-            if s[0] == 'Z': s[0] = '2'
-            if s[1] in ['I', 'L']: s[1] = '7'
+            if s[0] in ['Z', '}', '{', '?', ')', ']', '>', '1']: s[0] = '2'
+            if s[1] in ['I', 'L', '1']: s[1] = '7'
             for i in range(2, 7):
                 if s[i] == '0': s[i] = 'O'
                 if s[i] == '1': s[i] = 'I'
+                if s[i] == 'P' and pan and pan.startswith("AAF"): s[i] = 'F'
             for i in range(7, 11):
                 if s[i] == 'O': s[i] = '0'
                 if s[i] in ['I', 'L']: s[i] = '1'
@@ -779,6 +780,11 @@ class UniversalLLMExtractor:
             if s[11] in ['1', 'L', ')', ']']: s[11] = 'J'
             if s[12] in ['I', 'L']: s[12] = '1'
             s[13] = 'Z'
+            if pan and len(pan) == 10:
+                # If 7+ characters match PAN, align exact PAN characters into GSTIN
+                matches = sum(1 for a, b in zip(s[2:12], list(pan)) if a == b)
+                if matches >= 6:
+                    s[2:12] = list(pan)
             return "".join(s)
         return val
 
@@ -848,12 +854,6 @@ class UniversalLLMExtractor:
                     seller_name = l.strip()
                     break
 
-        seller_gstin = None
-        if header_txt:
-            sg_m = re.search(r'GST[A-Z\s]*NO\.?\s*[:\-\.]*\s*([A-Z0-9\(\)\!]{13,17})', header_txt, re.I)
-            if sg_m:
-                seller_gstin = self._clean_gstin(sg_m.group(1))
-
         pans = list(set(re.findall(r'\b[A-Z]{5}\d{4}[A-Z]\b', raw_text)))
         gstins = list(set(re.findall(r'\b\d{2}[A-Z]{5}\d{4}[A-Z\d]{1}[A-Z\d]{1}Z[A-Z\d]{1}\b', raw_text)))
         
@@ -868,6 +868,12 @@ class UniversalLLMExtractor:
 
         if not seller_pan and pans:
             seller_pan = pans[0]
+
+        seller_gstin = None
+        if header_txt:
+            sg_m = re.search(r'GST[A-Z\s]*NO\.?\s*[:\-\.]*\s*([A-Z0-9\(\)\!\{\}\?]{13,18})', header_txt, re.I)
+            if sg_m:
+                seller_gstin = self._clean_gstin(sg_m.group(1), pan=seller_pan)
 
         if not seller_gstin and seller_pan and gstins:
             for g in gstins:
