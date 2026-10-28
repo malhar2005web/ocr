@@ -71,6 +71,8 @@ class DocumentValidator:
                     calc_total += float(sgst)
                 if igst is not None:
                     calc_total += float(igst)
+                if "rounding_adjustment" in tax_details and tax_details["rounding_adjustment"] is not None:
+                    calc_total += float(tax_details["rounding_adjustment"])
 
                 gt_float = float(grand_total)
                 # Allow minor rounding discrepancy up to 1.0 currency unit

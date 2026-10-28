@@ -69,9 +69,13 @@ class TesseractOCREngine(BaseOCREngine):
         self._is_ready = False
         return False
 
-    def preprocess_image(self, image: Image.Image) -> Image.Image:
+    def preprocess_image(self, image: Any) -> Image.Image:
         """Adaptive image preprocessing: illumination normalization, deskew, and resolution scaling."""
         try:
+            if isinstance(image, str):
+                image = Image.open(image)
+            elif isinstance(image, np.ndarray):
+                image = Image.fromarray(image)
             np_img = np.array(image.convert("RGB"))
             gray = cv2.cvtColor(np_img, cv2.COLOR_RGB2GRAY)
             height, width = gray.shape
@@ -118,9 +122,9 @@ class TesseractOCREngine(BaseOCREngine):
             return Image.fromarray(sharpened)
         except Exception as e:
             logger.warning(f"Advanced image preprocessing skipped: {e}")
-            return image
+            return image if isinstance(image, Image.Image) else Image.open(image)
 
-    def extract_with_layout(self, image: Image.Image) -> Dict[str, Any]:
+    def extract_with_layout(self, image: Any) -> Dict[str, Any]:
         """
         Extracts both full raw text and layout-segmented regions (Header, Buyer, Invoice Meta,
         Goods Table, E-Invoice, Taxes, Remarks, Bank Details) using adaptive computer vision.
@@ -132,6 +136,11 @@ class TesseractOCREngine(BaseOCREngine):
             )
 
         import pytesseract
+
+        if isinstance(image, str):
+            image = Image.open(image)
+        elif isinstance(image, np.ndarray):
+            image = Image.fromarray(image)
 
         processed_img = self.preprocess_image(image)
         norm_np = np.array(processed_img)
@@ -147,35 +156,50 @@ class TesseractOCREngine(BaseOCREngine):
 
             dividers = []
             for y in range(len(h_proj)):
-                if h_proj[y] > (w * 0.20 * 255):
+                if h_proj[y] > (w * 0.15 * 255):
                     if not dividers or (y - dividers[-1]) > int(h * 0.015):
                         dividers.append(y)
 
-            # In standard structured GST invoices, dividers segment sections:
-            # 1. Header (y=0 to ~18% h)
-            # 2. Buyer (Left) & Invoice Meta (Right) (y=~16% to ~33% h)
-            # 3. Goods Table (y=~31% to ~56% h)
-            # 4. E-Invoice (Left) & Taxes (Right) (y=~53% to ~72% h)
-            # 5. Remarks & Totals (y=~67% to ~86% h)
-            # 6. Bank Details (Left) & Signatures (Right) (y=~85% to ~98% h)
-            header_y = dividers[0] if dividers and dividers[0] > int(h * 0.12) else int(h * 0.18)
-            meta_y2 = dividers[1] if len(dividers) > 1 and dividers[1] > int(h * 0.25) else int(h * 0.33)
-            goods_y2 = dividers[2] if len(dividers) > 2 and dividers[2] > int(h * 0.50) else int(h * 0.56)
+            # Adaptive boundary determination based on relative vertical geometry
+            header_divs = [d for d in dividers if 0.12 * h <= d <= 0.22 * h]
+            header_y = header_divs[-1] if header_divs else int(0.18 * h)
+
+            table_top_divs = [d for d in dividers if 0.26 * h <= d <= 0.38 * h]
+            table_top_y = table_top_divs[0] if table_top_divs else int(0.32 * h)
+
+            table_bot_divs = [d for d in dividers if 0.46 * h <= d <= 0.60 * h]
+            table_bot_y = table_bot_divs[-1] if table_bot_divs else int(0.55 * h)
+
+            einv_bot_divs = [d for d in dividers if 0.64 * h <= d <= 0.76 * h]
+            einv_bot_y = einv_bot_divs[-1] if einv_bot_divs else int(0.70 * h)
+
+            bank_top_divs = [d for d in dividers if 0.80 * h <= d <= 0.92 * h]
+            bank_top_y = bank_top_divs[-1] if bank_top_divs else int(0.85 * h)
 
             header_crop = norm_np[0:header_y, :]
-            buyer_crop = norm_np[int(h * 0.15):meta_y2, 0:int(w * 0.55)]
-            meta_crop = norm_np[int(h * 0.15):meta_y2, int(w * 0.48):w]
-            goods_crop = norm_np[meta_y2:goods_y2, :]
-            einv_crop = norm_np[goods_y2:int(h * 0.72), 0:int(w * 0.52)]
-            tax_crop = norm_np[goods_y2:int(h * 0.72), int(w * 0.58):w]
-            rem_crop = norm_np[int(h * 0.67):int(h * 0.86), :]
-            bank_crop = norm_np[int(h * 0.84):int(h * 0.99), 0:int(w * 0.60)]
+            buyer_crop = norm_np[header_y:table_top_y, 0:int(w * 0.52)]
+            meta_crop = norm_np[header_y:table_top_y, int(w * 0.48):w]
+            goods_crop = norm_np[table_top_y:table_bot_y, :].copy()
+            einv_crop = norm_np[table_bot_y:einv_bot_y, 0:int(w * 0.52)]
+            tax_crop = norm_np[table_bot_y:einv_bot_y, int(w * 0.50):w]
+            rem_crop = norm_np[einv_bot_y:bank_top_y, :]
+            bank_crop = norm_np[bank_top_y:int(h * 0.99), 0:int(w * 0.60)]
+
+            # Table line removal for pristine tabular text recognition without grid line noise
+            g_thresh = cv2.adaptiveThreshold(~goods_crop, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 15, -2)
+            gh_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (int(w / 15), 1))
+            gh_lines = cv2.morphologyEx(g_thresh, cv2.MORPH_OPEN, gh_kernel)
+            gv_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, int(goods_crop.shape[0] / 10)))
+            gv_lines = cv2.morphologyEx(g_thresh, cv2.MORPH_OPEN, gv_kernel)
+            g_table_lines = cv2.add(gh_lines, gv_lines)
+            g_dilated = cv2.dilate(g_table_lines, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)), iterations=1)
+            goods_no_lines = goods_crop.copy()
+            goods_no_lines[g_dilated > 0] = 255
 
             layout_regions["header"] = pytesseract.image_to_string(header_crop, config="--psm 6").strip()
             layout_regions["buyer"] = pytesseract.image_to_string(buyer_crop, config="--psm 6").strip()
             layout_regions["invoice_meta"] = pytesseract.image_to_string(meta_crop, config="--psm 6").strip()
-            # PSM 4 preserves column alignment in tabular data
-            layout_regions["goods_table"] = pytesseract.image_to_string(goods_crop, config="--psm 4").strip()
+            layout_regions["goods_table"] = pytesseract.image_to_string(goods_no_lines, config="--psm 6").strip()
             layout_regions["e_invoice"] = pytesseract.image_to_string(einv_crop, config="--psm 6").strip()
             layout_regions["taxes"] = pytesseract.image_to_string(tax_crop, config="--psm 6").strip()
             layout_regions["remarks"] = pytesseract.image_to_string(rem_crop, config="--psm 6").strip()

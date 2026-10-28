@@ -367,24 +367,28 @@ class UniversalLLMExtractor:
                     desc = re.sub(r'^\d+\s*[\.\-\]\|]?\s*', '', desc).strip()
 
                     after_hsn = l_s[l_s.find(hsn) + len(hsn):]
-                    nums = re.findall(r'[\d,]+\.?\d*', after_hsn)
+                    norm_after = re.sub(r'(\d+),(\d{2})\b', r'\1.\2', after_hsn)
+                    tokens = re.findall(r'[\d,]+\.?\d*', norm_after)
                     floats = []
-                    for n in nums:
+                    for t in tokens:
                         try:
-                            floats.append(float(n.replace(",", "")))
+                            floats.append(float(t.replace(",", "")))
                         except ValueError:
                             pass
 
                     # Arithmetic confirmation: qty * rate == amount
                     matched = False
+                    qty, rate, amt = 0.0, 0.0, 0.0
                     for i in range(len(floats)):
                         for j in range(i + 1, len(floats)):
                             for k in range(j + 1, len(floats)):
                                 q, r, a = floats[i], floats[j], floats[k]
-                                if abs(q * r - a) < 2.0 or abs(a - (q * r)) < 2.0:
-                                    qty, rate, amt = q, r, a
-                                    matched = True
-                                    break
+                                for q_cand in [q, q / 100.0 if q > 100 else q]:
+                                    if abs(q_cand * r - a) < 2.0 or abs(a - (q_cand * r)) < 2.0:
+                                        qty, rate, amt = q_cand, r, a
+                                        matched = True
+                                        break
+                                if matched: break
                             if matched: break
                         if matched: break
 
@@ -470,11 +474,45 @@ class UniversalLLMExtractor:
                             "Amount": amounts[-1] if amounts else "-"
                         })
 
-        # Dynamic Taxes (CGST, SGST, IGST)
+        # Dynamic Taxes (CGST, SGST, IGST) from Layout Regions or Full Text
+        tax_source = layout_regions.get("taxes") if layout_regions else ""
+        if tax_source:
+            for l in tax_source.splitlines():
+                if re.search(r'\b[CG]GST\b', l, re.I) and "cgst" not in custom:
+                    rate_m = re.search(r'(\d+(?:\.\d+)?)\s*%', l)
+                    if rate_m:
+                        custom["cgst_rate"] = f"{rate_m.group(1)}%"
+                    amts = re.findall(r'[\d,]+\.\d{2}', l)
+                    if amts:
+                        val = float(amts[-1].replace(",", ""))
+                        custom["cgst"] = val
+                        custom["cgst_amount"] = val
+                        if not custom.get("cgst_rate"):
+                            custom["cgst_rate"] = "9.00%"
+                if re.search(r'\bSGST\b', l, re.I) and "sgst" not in custom:
+                    rate_m = re.search(r'(\d+(?:\.\d+)?)\s*%', l)
+                    if rate_m:
+                        custom["sgst_rate"] = f"{rate_m.group(1)}%"
+                    amts = re.findall(r'[\d,]+\.\d{2}', l)
+                    if amts:
+                        val = float(amts[-1].replace(",", ""))
+                        custom["sgst"] = val
+                        custom["sgst_amount"] = val
+                        if not custom.get("sgst_rate"):
+                            custom["sgst_rate"] = "9.00%"
+                if re.search(r'\bRound', l, re.I) and "rounding_adjustment" not in custom:
+                    amts = re.findall(r'[\d,]+\.\d{2}', l)
+                    if amts:
+                        custom["rounding_adjustment"] = float(amts[-1].replace(",", ""))
+                if re.search(r'(?:Total\s*Amount|Amount\s*:-)', l, re.I) and "grand_total" not in custom:
+                    amts = re.findall(r'[\d,]+\.\d{2}', l)
+                    if amts:
+                        custom["grand_total"] = float(amts[-1].replace(",", ""))
+
         for idx, line in enumerate(lines):
             l_clean = line.strip()
             # CGST
-            if re.search(r'\bcgst\b', l_clean, re.I) and "cgst" not in custom:
+            if re.search(r'\b[cg]gst\b', l_clean, re.I) and "cgst" not in custom:
                 rate_m = re.search(r'(\d+(?:\.\d+)?)\s*%', l_clean)
                 if not rate_m and idx > 0:
                     rate_m = re.search(r'(\d+(?:\.\d+)?)\s*%', lines[idx - 1])
@@ -531,6 +569,16 @@ class UniversalLLMExtractor:
                         "Per": "-",
                         "Amount": f"{val:,.2f}"
                     })
+
+        # Intra-state symmetry fallback
+        if "cgst" in custom and "sgst" not in custom:
+            custom["sgst"] = custom["cgst"]
+            custom["sgst_amount"] = custom["cgst"]
+            custom["sgst_rate"] = custom.get("cgst_rate", "9.00%")
+        elif "sgst" in custom and "cgst" not in custom:
+            custom["cgst"] = custom["sgst"]
+            custom["cgst_amount"] = custom["sgst"]
+            custom["cgst_rate"] = custom.get("sgst_rate", "9.00%")
 
         # Taxable Value & Financial Totals
         actual_item_rows = [r for r in goods_rows if r.get("SI No") != "-" and r.get("Amount") and r["Amount"] != "-"]
@@ -715,7 +763,7 @@ class UniversalLLMExtractor:
     def _clean_gstin(self, val: Optional[str]) -> Optional[str]:
         if not val:
             return None
-        v = re.sub(r'[^A-Z0-9]', '', val.upper())
+        v = re.sub(r'[^A-Z0-9\(\)\]\[]', '', val.upper())
         if len(v) >= 15:
             s = list(v[:15])
             if s[0] == 'Z': s[0] = '2'
@@ -728,7 +776,8 @@ class UniversalLLMExtractor:
                 if s[i] in ['I', 'L']: s[i] = '1'
                 if s[i] == 'S': s[i] = '5'
             if s[11] == '0': s[11] = 'O'
-            if s[11] in ['1', 'L']: s[11] = 'I'
+            if s[11] in ['1', 'L', ')', ']']: s[11] = 'J'
+            if s[12] in ['I', 'L']: s[12] = '1'
             s[13] = 'Z'
             return "".join(s)
         return val
@@ -801,7 +850,7 @@ class UniversalLLMExtractor:
 
         seller_gstin = None
         if header_txt:
-            sg_m = re.search(r'GST[IN\s]*NO\s*[:\-\.]*\s*([A-Z0-9]{13,16})', header_txt, re.I)
+            sg_m = re.search(r'GST[A-Z\s]*NO\.?\s*[:\-\.]*\s*([A-Z0-9\(\)\!]{13,17})', header_txt, re.I)
             if sg_m:
                 seller_gstin = self._clean_gstin(sg_m.group(1))
 
@@ -904,10 +953,9 @@ class UniversalLLMExtractor:
                     buyer_name = l.strip()
                     break
 
-            bg_m = re.search(r'GSTIN\s*(?:No\.?)?\s*[:\-\.!]*\s*([A-Z0-9]{13,16})', buyer_txt, re.I)
+            bg_m = re.search(r'GST[A-Z\s]*NO\.?\s*[:\-\.!]*\s*([A-Z0-9\(\)\!]{13,17})', buyer_txt, re.I)
             if bg_m:
-                cand = bg_m.group(1).replace(")", "J").replace("!", "").replace("E", "F", 1)
-                buyer_gstin = self._clean_gstin(cand)
+                buyer_gstin = self._clean_gstin(bg_m.group(1))
 
             for l in b_lines:
                 if ("Ground" in l or "TTC" in l or "Road" in l) and not buyer_address:
@@ -1017,20 +1065,22 @@ class UniversalLLMExtractor:
             if in_m:
                 inv_num = re.sub(r'\s+', '', in_m.group(0))
 
-            id_m = re.search(r'(?:Date|Dated)\s*[\n\s:]*(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})', inv_txt, re.I)
-            if not id_m:
-                id_m = re.search(r'(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})', inv_txt)
-            if id_m:
-                inv_date = self._format_date_iso(id_m.group(1))
+            pod_m = re.search(r'PO\s*Date[^\d]*(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})', inv_txt, re.I)
+            if pod_m:
+                po_date = self._format_date_iso(pod_m.group(1))
 
             per_m = re.search(r'(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})\s*(?:to|To|-)\s*(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})', inv_txt)
             if per_m:
                 period_start = self._format_date_iso(per_m.group(1))
                 period_end = self._format_date_iso(per_m.group(2))
 
-            pod_m = re.search(r'PO\s*Date\s*[\n\s:]*(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})', inv_txt, re.I)
-            if pod_m:
-                po_date = self._format_date_iso(pod_m.group(1))
+            all_inv_dates = [self._format_date_iso(d) for d in re.findall(r'(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})', inv_txt)]
+            non_inv = {po_date, period_start, period_end}
+            valid_inv_dates = [d for d in all_inv_dates if d and d not in non_inv]
+            if valid_inv_dates:
+                inv_date = valid_inv_dates[0]
+            elif all_inv_dates:
+                inv_date = all_inv_dates[0]
 
             po_match = re.search(r'([A-Za-z]{2,6}-\d{3,6}-\d{2,4}(?:-\d{2,4})?)', inv_txt)
             if po_match:
@@ -1120,11 +1170,11 @@ class UniversalLLMExtractor:
 
         remarks = None
         rem_source = rem_txt or raw_text
-        rem_m = re.search(r'Remarks\s*[:\-]\s*([^\n]+(?:\n[^\n]+)?)', rem_source, re.I)
+        rem_m = re.search(r'Remarks\s*[:\-]\s*([\s\S]+?)(?=\n\s*(?:Declaration|Terms|Our\s*Bank|$))', rem_source, re.I)
         if rem_m:
-            r_text = re.sub(r'\s+', ' ', rem_m.group(1).strip())
-            r_text = r_text.replace(":-", ":").replace("NBAME", "NAME")
-            remarks = r_text
+            raw_rem = rem_m.group(1).strip()
+            clean_lines = [re.sub(r'\s+', ' ', l).strip() for l in raw_rem.splitlines() if l.strip() and not l.strip().startswith("E. &") and not l.strip().startswith("E.&")]
+            remarks = "; ".join(clean_lines).replace(":-", ":").replace("NBAME", "NAME")
 
         invoice_details = {
             "invoice_type": inv_type,
@@ -1219,9 +1269,9 @@ class UniversalLLMExtractor:
         ack_m = re.search(r'AckNo"?\s*[:\-]?\s*"?(\d{10,20})', einv_source, re.I)
         if ack_m:
             ack_no = ack_m.group(1).strip()
-        ack_dt_m = re.search(r'AckDt"?\s*[:\-]?\s*"?(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})', einv_source, re.I)
+        ack_dt_m = re.search(r'AckDt"?\s*[:\-]?\s*"?(\d{4}-\d{2}-\d{2}[\s\nT]+\d{2}:\d{2}:\d{2})', einv_source, re.I)
         if ack_dt_m:
-            ack_dt = ack_dt_m.group(1).replace(" ", "T")
+            ack_dt = re.sub(r'[\s\n]+', 'T', ack_dt_m.group(1).strip())
 
         irn_val = None
         irn_pos = einv_source.lower().find("irn")
@@ -1277,11 +1327,30 @@ class UniversalLLMExtractor:
 
         # 5. Bank Details
         bd = custom.get("bank_details", {})
+        bank_name = bd.get("bank_name") or "-"
+        branch = bd.get("branch") or "-"
+        acc_no = bd.get("account_number") or "-"
+        ifsc = bd.get("ifsc_code") or "-"
+
+        if bank_txt:
+            b_name_m = re.search(r'(?:Bank\s*Name|Bank)\s*[:\-]\s*([A-Za-z\s]+(?:BANK|Bank|LTD|Ltd|\.))', bank_txt, re.I)
+            if b_name_m:
+                bank_name = b_name_m.group(1).strip()
+            b_br_m = re.search(r'Branch\s*[:\-]\s*([^\n\(\)]+(?:\([^\)]+\))?)', bank_txt, re.I)
+            if b_br_m:
+                branch = b_br_m.group(1).strip()
+            b_acc_m = re.search(r'(?:A/c\s*(?:No\.?)?|Account\s*No\.?)\s*[:\-]?\s*(\d{9,18})', bank_txt, re.I)
+            if b_acc_m:
+                acc_no = b_acc_m.group(1).strip()
+            ifsc_m = re.search(r'\b([A-Z]{4}0[A-Z0-9]{6})\b', bank_txt)
+            if ifsc_m:
+                ifsc = ifsc_m.group(1).strip()
+
         our_bank_details = {
-            "bank_name": bd.get("bank_name") or "-",
-            "branch": bd.get("branch") or "-",
-            "account_number": bd.get("account_number") or "-",
-            "ifsc_code": bd.get("ifsc_code") or "-",
+            "bank_name": bank_name,
+            "branch": branch,
+            "account_number": acc_no,
+            "ifsc_code": ifsc,
             "account_holder_name": seller_name or "-"
         }
 
