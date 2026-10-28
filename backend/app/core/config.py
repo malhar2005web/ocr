@@ -33,8 +33,8 @@ class Settings(BaseSettings):
     LLM_PROVIDER: str = Field(default="open_weight", description="open_weight, ollama, or none")
     LLM_BASE_URL: Optional[str] = Field(default=None, description="OpenAI-compatible base URL (e.g., Groq, OpenRouter, Ollama, vLLM)")
     LLM_API_KEY: Optional[str] = Field(default=None, description="API Key for hosted inference")
-    LLM_MODEL: str = Field(default="qwen-2.5-72b-instruct", description="Model name to use for extraction")
-    LLM_TIMEOUT: int = 180
+    LLM_MODEL: str = Field(default="qwen2.5:0.5b", description="Model name to use for extraction")
+    LLM_TIMEOUT: int = 60
     
     # RAG Settings
     ENABLE_RAG: bool = True

@@ -233,8 +233,25 @@ Audit the candidate data against the document text. Return JSON with audit_statu
                 # 1. Handle audit-diff output (fast & clean)
                 if "audit_status" in verified_json or "corrections" in verified_json:
                     corrections = verified_json.get("corrections", {})
+                    # Normalize list of dicts (common in lightweight models) to dict
+                    if isinstance(corrections, list):
+                        flat_corr = {}
+                        for item in corrections:
+                            if isinstance(item, dict):
+                                flat_corr.update(item)
+                        corrections = flat_corr
+
                     if isinstance(corrections, dict):
                         for path, val in corrections.items():
+                            val_str = str(val).strip()
+                            if not val_str or val_str.lower() in ["none", "null", "undefined"]:
+                                continue
+                            # Anti-hallucination check: only apply if value actually appears in raw text or is numeric
+                            if val_str.lower() not in raw_text.lower():
+                                clean_val = re.sub(r'[^a-zA-Z0-9]', '', val_str.lower())
+                                clean_raw = re.sub(r'[^a-zA-Z0-9]', '', raw_text.lower())
+                                if len(clean_val) > 2 and clean_val not in clean_raw and not isinstance(val, (int, float)):
+                                    continue
                             parts = path.split(".")
                             target = candidate_data
                             if "content" in candidate_data and "custom_fields" in candidate_data["content"]:
@@ -600,6 +617,46 @@ Audit the candidate data against the document text. Return JSON with audit_statu
                     "Amount": m[5]
                 })
 
+        # 3b. Tally / GST vertical invoice layout (Sl No + Description on first line, followed by Amount, Per, Rate, Qty, HSN)
+        if not goods_rows:
+            tally_pattern = re.compile(
+                r'(?:^|\n)\s*(\d{1,2})\s+([A-Za-z0-9\s\-\.\/\(\)]+?)\s*\n\s*([\d,]+\.\d{2})\s*\n\s*([A-Za-z0-9\.\/]+)\s*\n\s*([\d,]+\.\d{2})\s*\n\s*([\d,]+(?:\.\d{2,3})?)\s*([A-Za-z0-9\.\/]+)?\s*\n\s*(\d{4,8})',
+                re.MULTILINE
+            )
+            for m in tally_pattern.finditer(raw_text):
+                sl_no = m.group(1)
+                desc = m.group(2).strip()
+                amt = m.group(3)
+                per = m.group(4).strip()
+                rate = m.group(5)
+                qty = m.group(6)
+                unit = m.group(7) or per
+                hsn = m.group(8)
+
+                # Collect extra description lines if any
+                pos_end = m.end()
+                rest = raw_text[pos_end:]
+                extra_lines = []
+                for el in rest.splitlines():
+                    el_s = el.strip()
+                    if not el_s:
+                        continue
+                    if any(term in el_s.lower() for term in ["cgst", "sgst", "total", "round off", "amount chargeable", "hsn/sac", "taxable"]):
+                        break
+                    extra_lines.append(el_s)
+                if extra_lines:
+                    desc = f"{desc} ({', '.join(extra_lines)})"
+
+                goods_rows.append({
+                    "SI No": sl_no,
+                    "Description of Goods": desc,
+                    "HSN/SAC": hsn,
+                    "Quantity": f"{qty} {unit}".strip(),
+                    "Rate": rate,
+                    "Per": per,
+                    "Amount": amt
+                })
+
         # 3. Horizontal line items (Tesseract OCR / single lines)
         if not goods_rows:
             for line in lines:
@@ -959,6 +1016,20 @@ Audit the candidate data against the document text. Return JSON with audit_statu
         if not date_str:
             return None
         d = date_str.strip()
+        month_map = {
+            "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+            "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12
+        }
+        m_txt = re.match(r'(\d{1,2})[\s\-\/\.]([A-Za-z]{3,9})[\s\-\/\.](\d{2,4})', d)
+        if m_txt:
+            day = int(m_txt.group(1))
+            m_str = m_txt.group(2)[:3].lower()
+            yr = m_txt.group(3)
+            if len(yr) == 2:
+                yr = "20" + yr
+            if m_str in month_map:
+                return f"{yr}-{month_map[m_str]:02d}-{day:02d}"
+
         m = re.match(r'(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{2,4})', d)
         if m:
             p1, p2, yr = int(m.group(1)), int(m.group(2)), m.group(3)
@@ -1009,6 +1080,23 @@ Audit the candidate data against the document text. Return JSON with audit_statu
                     break
 
         if not seller_name:
+            einv_seller_m = re.search(r'e-Invoice\s*\n\s*([A-Za-z0-9\s\.\&\,\-\(\)]+?)(?=\n\s*(?:Mani|Plot|Sector|Room|Bhuvan|Bldg|Building|Floor|Flr|Flat|Shop|Road|Gala|GSTIN|State|$))', raw_text, re.I)
+            if einv_seller_m:
+                cand = einv_seller_m.group(1).strip()
+                if len(cand) > 3 and not any(k in cand.lower() for k in ["tax invoice", "irn", "ack"]):
+                    seller_name = cand
+
+        if not seller_name:
+            for_m = re.search(r'for\s+([A-Za-z0-9\s\.\&\-]+?)\s*\n\s*Authorised', raw_text, re.I)
+            if for_m:
+                seller_name = for_m.group(1).strip()
+
+        if not seller_name:
+            ac_m = re.search(r'A/c\s*Holder[’\']?s\s*Name\s*[:\-]\s*([^\n]+)', raw_text, re.I)
+            if ac_m:
+                seller_name = ac_m.group(1).strip()
+
+        if not seller_name:
             seller_m = re.search(r'For\s+M/S\.?\s*([A-Za-z0-9\s\.\&\-]+?)(?=\n|Authorised|Receiver|$)', raw_text, re.I)
             if seller_m:
                 cand = seller_m.group(1).strip()
@@ -1017,7 +1105,7 @@ Audit the candidate data against the document text. Return JSON with audit_statu
 
         if not seller_name:
             for l in lines[:5]:
-                if any(k in l.upper() for k in ["ENTERPRISES", "SOLUTIONS", "CONCRETE", "INFRA", "PVT", "LTD"]):
+                if any(k in l.upper() for k in ["ENTERPRISES", "SOLUTIONS", "CONCRETE", "INFRA", "PVT", "LTD", "TRADERS", "COMPANY", "CORP", "ASSOCIATES", "INDUSTRIES"]):
                     seller_name = l.strip()
                     break
 
@@ -1165,9 +1253,18 @@ Audit the candidate data against the document text. Return JSON with audit_statu
                                 break
 
         if not buyer_name:
+            buyer_m = re.search(r'Buyer\s*(?:\(Bill\s*to\))?\s*[:\-]?\s*\n\s*([A-Za-z0-9\s\.\&\-]+?)(?=\n\s*(?:Room|Floor|Flr|Flat|Plot|Sector|Building|Bldg|GSTIN|State|Road|$))', raw_text, re.I)
+            if buyer_m:
+                cand = buyer_m.group(1).strip()
+                if len(cand) > 2:
+                    buyer_name = cand
+
+        if not buyer_name:
             buyer_m = re.search(r'(?:Buyer|Bill\s*to)\s*[:\-\s\n]*([A-Za-z0-9\s\.\&\-]+?)(?=\n|Plot|GSTIN|$)', raw_text, re.I)
             if buyer_m:
-                buyer_name = buyer_m.group(1).strip()
+                cand = buyer_m.group(1).strip()
+                if cand:
+                    buyer_name = cand
 
         contact_person = None
         cp_m = re.search(r'Contact\s*Person\s*[:\-]\s*([^\n]+)', raw_text, re.I)
@@ -1178,6 +1275,14 @@ Audit the candidate data against the document text. Return JSON with audit_statu
         cn_m = re.search(r'(?:Contact\s*Number|Phone|Mobile|Mob\.?)\s*[:\-]?\s*(\d{10})', raw_text, re.I)
         if cn_m:
             contact_number = cn_m.group(1).strip()
+
+        if not buyer_address:
+            buyer_sec_m = re.search(r'Buyer\s*(?:\(Bill\s*to\))?\s*[:\-]?\s*([\s\S]+?)(?=\n\s*GSTIN)', raw_text, re.I)
+            if buyer_sec_m:
+                b_block = buyer_sec_m.group(1).strip().splitlines()
+                addr_lines = [l.strip().rstrip(",") for l in b_block[1:] if l.strip() and not l.strip().startswith(":") and not l.strip().lower().startswith("state")]
+                if addr_lines:
+                    buyer_address = ", ".join(addr_lines)
 
         if not buyer_address:
             addr_m = re.search(r'Address\s*[:\-]\s*([\s\S]+?)(?=\n\s*(?:MAHARASTRA|Maharashtra|GSTIN|PAN|Name\s*Of\s*State|Period|PO|$))', raw_text, re.I)
@@ -1284,12 +1389,12 @@ Audit the candidate data against the document text. Return JSON with audit_statu
                 for offset in [-4, -3, -2, -1, 1, 2]:
                     pos = dated_idx + offset
                     if 0 <= pos < len(lines):
-                        pm = re.match(r'^(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})$', lines[pos].strip())
+                        pm = re.match(r'^(\d{1,2}[\/\-\.](?:[A-Za-z]{3}|\d{1,2})[\/\-\.]\d{2,4})$', lines[pos].strip())
                         if pm:
                             inv_date = self._format_date_iso(pm.group(1))
                             break
             if not inv_date:
-                d_m = re.search(r'(?:Dated\.?|Invoice\s*Date)\s*[:\-\s\n]*(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})', raw_text, re.I)
+                d_m = re.search(r'(?:Dated\.?|Invoice\s*Date)\s*[:\-\s\n]*(\d{1,2}[\/\-\.](?:[A-Za-z]{3}|\d{1,2})[\/\-\.]\d{2,4})', raw_text, re.I)
                 if d_m:
                     inv_date = self._format_date_iso(d_m.group(1))
 
@@ -1447,6 +1552,10 @@ Audit the candidate data against the document text. Return JSON with audit_statu
         ack_dt_m = re.search(r'AckDt"?\s*[:\-]?\s*"?(\d{4}-\d{2}-\d{2}[\s\nT]+\d{2}:\d{2}:\d{2})', combined_einv, re.I)
         if ack_dt_m:
             ack_dt = re.sub(r'[\s\n]+', 'T', ack_dt_m.group(1).strip())
+        if not ack_dt:
+            ack_dt_text_m = re.search(r'Ack\s*Date\s*[:\-]?\s*([0-9A-Za-z\-\/\.\s]{6,20})', combined_einv, re.I)
+            if ack_dt_text_m:
+                ack_dt = self._format_date_iso(ack_dt_text_m.group(1).strip())
 
         irn_val = None
         irn_pos = combined_einv.lower().find("irn")
