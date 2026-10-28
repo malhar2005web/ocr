@@ -56,40 +56,34 @@ REQUIRED JSON SCHEMA:
 }
 """
 
-CROSS_VERIFICATION_SYSTEM_PROMPT = """You are a Principal Document Intelligence Verification Auditor.
-Your task is to CROSS-VERIFY, AUDIT, and RECONCILE structured document data against ground-truth text extracted from Tesseract OCR and PyMuPDF.
+CROSS_VERIFICATION_SYSTEM_PROMPT = """You are a Senior Document Intelligence Verification Auditor.
+Your task is to CROSS-VERIFY and AUDIT candidate structured document data against ground-truth text extracted from Tesseract OCR and PyMuPDF.
 
-You are provided with:
-1. Ground-Truth Document Text & Segmented Layout Regions (from OCR/PyMuPDF).
-2. Initial Candidate Extraction JSON (pre-extracted by layout-aware parsing rules).
+CRITICAL AUDIT RULES:
+1. Verify Seller and Buyer details (Names, GSTINs, PAN, Addresses, State).
+   - If an OCR typo is found in candidate data (e.g. broken company name or misread GSTIN character), provide the correction.
+2. Verify line items (description, HSN/SAC code, quantity, rate, amount). Ensure quantity * rate ≈ amount.
+3. Verify taxes (CGST, SGST, IGST), rounding adjustments, and grand total.
+4. Verify invoice number, dates, acknowledgement number, IRN, and bank details.
 
-YOUR AUDIT MANDATES:
-1. Cross-Verification & Error Correction:
-   - Carefully audit every field in the candidate JSON against the ground-truth text and layout regions.
-   - Correct OCR optical misreadings:
-     - GSTIN: Must be exactly 15 alphanumeric characters. Fix typical OCR confusions (e.g. '{'/'}' -> '2', ')'/']' -> 'J', 'O' -> '0' in numeric slots, '0' -> 'O' in alpha slots).
-     - PAN: Must be exactly 10 characters (5 uppercase letters + 4 digits + 1 letter).
-     - Company/Vendor Names: Fix broken characters or OCR spelling anomalies (e.g. 'Infraproiects' -> 'Infraprojects').
-     - Bank Details: Ensure Bank Name, Branch, Account Number, and IFSC code (4 letters + '0' + 6 alphanumeric) are clean and accurate.
-2. Line Items & Mathematical Integrity:
-   - For line items in goods_and_tax_details or tables:
-     - Verify Description of Goods, HSN/SAC code, Quantity, Unit, Rate, and Amount.
-     - Enforce arithmetic consistency: Quantity * Rate ≈ Amount.
-     - NEVER corrupt mathematically verified line item numbers with hallucinated values.
-3. Taxes & Financial Totals:
-   - Ensure subtotal (taxable value) is accurately cross-checked.
-   - Verify CGST, SGST, IGST rates and amounts (e.g., 9% CGST + 9% SGST).
-   - Verify Rounding Adjustment (if present) and Total Amount After Tax (Grand Total).
-   - Ensure: Subtotal + Total Taxes + Rounding Adjustment = Grand Total.
-4. Dates & Metadata:
-   - Disambiguate Invoice Date, PO Date, Challan Date, Billing Period Dates, and E-Invoice Ack Date.
-   - Disambiguate Invoice Number, PO Number, Challan Number, E-Way Bill Number.
-   - Ensure 64-character hexadecimal IRN and 15-digit Ack No are cleanly preserved if present.
-5. Schema Integrity:
-   - Return the output in the EXACT same JSON schema structure as the candidate JSON.
-   - Maintain top-level keys: "document_type", "metadata", "content".
-   - Under content.custom_fields, maintain "contract_and_invoice_details", "goods_and_tax_details", and "our_bank_details" when present.
-   - Output ONLY valid raw JSON. No markdown fences (no ```json), no explanatory conversational text.
+RESPONSE FORMAT:
+Return a single JSON object with this exact structure:
+{
+  "audit_status": "verified",
+  "corrections": {},
+  "audit_summary": "Summary of audit verification results"
+}
+
+If any candidate field contains an OCR typo or missing value found in the document text, return it in the corrections map:
+{
+  "audit_status": "corrections_applied",
+  "corrections": {
+    "field_path": "corrected_value"
+  },
+  "audit_summary": "Explanation of verified corrections"
+}
+If all candidate fields are accurate, return an empty corrections object {}.
+Output ONLY pure raw JSON without markdown formatting or code fences.
 """
 
 class UniversalLLMExtractor:
@@ -122,7 +116,8 @@ class UniversalLLMExtractor:
             "llm_provider": "none",
             "model": None,
             "extraction_mode": "deterministic_ocr_verified",
-            "cross_verification_status": "skipped_no_api_key"
+            "cross_verification_status": "skipped_no_api_key",
+            "audit_summary": None
         }
 
         # Check if LLM endpoint is configured for Pass 2 cross-verification
@@ -130,7 +125,7 @@ class UniversalLLMExtractor:
         if self.base_url and self.provider != "none" and (self.api_key or is_local):
             try:
                 logger.info(f"Pass 2: Invoking Qwen LLM Cross-Verification ({self.model}) via {self.base_url}...")
-                reconciled_data = await self._cross_verify_with_llm(
+                reconciled_data, audit_summary = await self._cross_verify_with_llm(
                     candidate_data=candidate_data,
                     raw_text=raw_text,
                     layout_regions=layout_regions,
@@ -141,13 +136,15 @@ class UniversalLLMExtractor:
                 llm_metadata["model"] = self.model
                 llm_metadata["extraction_mode"] = "hybrid_cross_verified"
                 llm_metadata["cross_verification_status"] = "verified"
+                llm_metadata["audit_summary"] = audit_summary
                 return reconciled_data, llm_metadata
             except Exception as e:
-                logger.warning(f"Pass 2: Qwen LLM cross-verification failed or timed out: {e}. Retaining Pass 1 deterministic candidate data.")
+                err_detail = str(e).strip() or type(e).__name__
+                logger.warning(f"Pass 2: Qwen LLM cross-verification failed: {err_detail}. Retaining Pass 1 deterministic candidate data.")
                 llm_metadata["llm_provider"] = self.provider
                 llm_metadata["model"] = self.model
                 llm_metadata["extraction_mode"] = "deterministic_ocr_verified"
-                llm_metadata["cross_verification_status"] = f"fallback_to_ocr: {str(e)[:60]}"
+                llm_metadata["cross_verification_status"] = f"fallback_to_ocr: {err_detail[:60]}"
                 return candidate_data, llm_metadata
 
         return candidate_data, llm_metadata
@@ -159,7 +156,7 @@ class UniversalLLMExtractor:
         layout_regions: Optional[Dict[str, str]],
         detected_tables: List[Dict[str, Any]],
         filename: str
-    ) -> Dict[str, Any]:
+    ) -> Tuple[Dict[str, Any], str]:
         """
         Cross-verifies, audits, and reconciles the Pass 1 candidate data against the
         ground-truth OCR text and layout regions using Qwen LLM.
@@ -193,10 +190,10 @@ class UniversalLLMExtractor:
 {regions_summary[:3000]}
 """
         user_content += f"""
-=== INITIAL CANDIDATE EXTRACTION JSON TO BE CROSS-VERIFIED & AUDITED ===
+=== CANDIDATE DATA TO BE CROSS-VERIFIED & AUDITED ===
 {json.dumps(compact_candidate, separators=(',', ':') if is_cpu_local else None, indent=None if is_cpu_local else 2)}
 
-Please audit, cross-verify, correct any OCR errors, reconcile line items and totals, and return the final verified JSON matching the exact schema. Output ONLY pure raw JSON:"""
+Audit the candidate data against the document text. Return JSON with audit_status, corrections, and audit_summary. Output pure JSON only:"""
 
         payload = {
             "model": self.model,
@@ -229,23 +226,44 @@ Please audit, cross-verify, correct any OCR errors, reconcile line items and tot
             clean_content = re.sub(r"```$", "", clean_content.strip())
             verified_json = json.loads(clean_content)
 
-            # Reconcile schema: ensure essential structure is maintained
-            if not isinstance(verified_json, dict):
-                return candidate_data
+            audit_summary = "All candidate data verified against ground truth."
+            if isinstance(verified_json, dict):
+                audit_summary = verified_json.get("audit_summary") or audit_summary
 
-            if "content" in verified_json and isinstance(verified_json["content"], dict):
-                for k in ["document_type", "metadata"]:
-                    if k not in verified_json and k in candidate_data:
-                        verified_json[k] = candidate_data[k]
-                return verified_json
-            elif "contract_and_invoice_details" in verified_json or "goods_and_tax_details" in verified_json:
-                candidate_data["content"]["custom_fields"] = verified_json
-                return candidate_data
-            elif "custom_fields" in verified_json:
-                candidate_data["content"]["custom_fields"] = verified_json["custom_fields"]
-                return candidate_data
+                # 1. Handle audit-diff output (fast & clean)
+                if "audit_status" in verified_json or "corrections" in verified_json:
+                    corrections = verified_json.get("corrections", {})
+                    if isinstance(corrections, dict):
+                        for path, val in corrections.items():
+                            parts = path.split(".")
+                            target = candidate_data
+                            if "content" in candidate_data and "custom_fields" in candidate_data["content"]:
+                                cf = candidate_data["content"]["custom_fields"]
+                                if isinstance(cf, dict) and parts[0] in cf:
+                                    target = cf
+                            for p in parts[:-1]:
+                                if isinstance(target, dict) and p in target:
+                                    target = target[p]
+                                else:
+                                    break
+                            if isinstance(target, dict) and parts[-1] in target:
+                                target[parts[-1]] = val
+                    return candidate_data, audit_summary
 
-            return candidate_data
+                # 2. Handle full schema output if returned
+                if "content" in verified_json and isinstance(verified_json["content"], dict):
+                    for k in ["document_type", "metadata"]:
+                        if k not in verified_json and k in candidate_data:
+                            verified_json[k] = candidate_data[k]
+                    return verified_json, audit_summary
+                elif "contract_and_invoice_details" in verified_json or "goods_and_tax_details" in verified_json:
+                    candidate_data["content"]["custom_fields"] = verified_json
+                    return candidate_data, audit_summary
+                elif "custom_fields" in verified_json:
+                    candidate_data["content"]["custom_fields"] = verified_json["custom_fields"]
+                    return candidate_data, audit_summary
+
+            return candidate_data, audit_summary
 
     async def _call_llm(
         self,

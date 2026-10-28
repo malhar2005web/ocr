@@ -729,6 +729,12 @@ export default function DocumentDetailView({ documentId, onBack }) {
                       </strong>
                     </div>
                   )}
+                  {extraction_metadata?.audit_summary && (
+                    <div style={{ gridColumn: 'span 2', fontSize: '0.82rem', marginTop: 4, padding: '6px 10px', background: 'rgba(255, 255, 255, 0.03)', borderRadius: 6 }}>
+                      <span style={{ color: 'var(--accent)', fontWeight: 600 }}>Auditor Note: </span>
+                      <span style={{ color: 'var(--text-main)' }}>{extraction_metadata.audit_summary}</span>
+                    </div>
+                  )}
                 </div>
               </div>
 
