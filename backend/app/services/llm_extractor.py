@@ -1133,10 +1133,10 @@ Audit the candidate data against the document text. Return JSON with audit_statu
                     break
 
         if not seller_name:
-            einv_seller_m = re.search(r'e-Invoice\s*\n\s*([A-Za-z0-9\s\.\&\,\-\(\)]+?)(?=\n\s*(?:Plot|Sector|Room|Bldg|Building|Floor|Flr|Flat|Shop|Road|Gala|Lane|Street|Nagar|Colony|Industrial|Estate|Phase|S\.?No|Survey|H\.?No|GSTIN|State|Code|$))', raw_text, re.I)
+            einv_seller_m = re.search(r'e-Invoice\s*\n\s*([^\n]+)', raw_text, re.I)
             if einv_seller_m:
                 cand = einv_seller_m.group(1).strip()
-                if len(cand) > 3 and not any(k in cand.lower() for k in ["tax invoice", "irn", "ack"]):
+                if len(cand) > 3 and not any(k in cand.lower() for k in ["tax invoice", "irn", "ack", "gstin"]):
                     seller_name = cand
 
         if not seller_name:
