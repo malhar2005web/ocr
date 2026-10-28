@@ -1556,11 +1556,20 @@ Audit the candidate data against the document text. Return JSON with audit_statu
                 ack_dt = self._format_date_iso(ack_dt_text_m.group(1).strip())
 
         irn_val = None
-        irn_m = re.search(r'IRN\s*[:\-]?\s*([a-f0-9\s\n\-]{40,85})', raw_text, re.I)
+        irn_m = re.search(r'IRN\s*[:\-]?\s*([a-f0-9\s\n\-]{40,90})', raw_text, re.I)
         if irn_m:
             cand_irn = re.sub(r'[\s\n]+', '', irn_m.group(1))
-            if len(cand_irn) >= 40:
-                irn_val = cand_irn
+            hex_count = 0
+            clean_irn_chars = []
+            for ch in cand_irn:
+                if ch in "0123456789abcdefABCDEF":
+                    if hex_count < 64:
+                        clean_irn_chars.append(ch)
+                        hex_count += 1
+                elif ch == '-' and 0 < hex_count < 64:
+                    clean_irn_chars.append(ch)
+            if hex_count == 64:
+                irn_val = "".join(clean_irn_chars)
         if not irn_val:
             irn_pos = combined_einv.lower().find("irn")
             search_irn_str = combined_einv[irn_pos:] if irn_pos != -1 else combined_einv
@@ -1702,7 +1711,17 @@ Audit the candidate data against the document text. Return JSON with audit_statu
                     pass
 
         tot_tax_val = custom.get("total_tax_amount") or round(cgst_amt + sgst_amt, 2)
-        grand_total_val = custom.get("grand_total") or round(subtotal_val + tot_tax_val + (rounding_adj or 0.0), 2)
+        calc_total = round(subtotal_val + tot_tax_val + (rounding_adj or 0.0), 2)
+
+        gt_cand = None
+        gt_m = re.search(r'Total\s+[\d,\.]+\s+[A-Za-z0-9\.\/]+\s+[^\d\n]*([\d,]+\.\d{2})', raw_text, re.I)
+        if gt_m:
+            try:
+                gt_cand = float(gt_m.group(1).replace(",", ""))
+            except ValueError:
+                pass
+
+        grand_total_val = gt_cand or (calc_total if calc_total > 0 else custom.get("grand_total"))
 
         amt_words = custom.get("amount_chargeable_in_words")
         if not amt_words:
