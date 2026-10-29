@@ -712,6 +712,59 @@ Audit the candidate data against the document text. Return JSON with audit_statu
                     "additional_details": extra_lines if extra_lines else None
                 })
 
+        # 3d. Textile & Job-work vertical column blocks (Pieces -> Rate -> Particular -> Aprx.Mts -> Amount -> Bale No)
+        if not goods_rows:
+            i = 0
+            doc_hsn = None
+            hm = re.search(r'HSN\s*CODE\s*[:\-]?\s*[\s\S]+?(\d{6,8})', raw_text, re.I)
+            if hm:
+                doc_hsn = hm.group(1)
+
+            while i < len(lines):
+                l = lines[i]
+                if re.match(r'^\d{2,6}$', l) and i + 1 < len(lines) and re.match(r'^\d+\.\d{2}$', lines[i+1]):
+                    pcs = int(l)
+                    rate = float(lines[i+1])
+                    particular_lines = []
+                    amt = None
+                    bale = None
+                    aprx_mts = 0.0
+                    j = i + 2
+                    while j < len(lines) and j < i + 10:
+                        sub = lines[j]
+                        if any(term in sub.lower() for term in ["total", "disc", "taxble", "cgst", "sgst", "igst"]):
+                            break
+                        if re.match(r'^\d+\.\d{2}$', sub):
+                            val = float(sub)
+                            if val == 0.0:
+                                aprx_mts = val
+                            elif val > 100.0 or val > 0:
+                                amt = val
+                                if j + 1 < len(lines) and re.match(r'^\d{4,8}$', lines[j+1]):
+                                    bale = lines[j+1]
+                                    j += 1
+                                break
+                        else:
+                            particular_lines.append(sub)
+                        j += 1
+
+                    if amt is not None and bale is not None:
+                        desc = " ".join(particular_lines).strip()
+                        goods_rows.append({
+                            "SI No": str(len(goods_rows) + 1),
+                            "Description of Goods": desc,
+                            "bale_number": bale,
+                            "approx_meters": aprx_mts,
+                            "pieces": pcs,
+                            "HSN/SAC": doc_hsn or "520811",
+                            "Quantity": f"{pcs} PCS",
+                            "Rate": f"{rate:,.2f}",
+                            "Per": "PCS",
+                            "Amount": f"{amt:,.2f}"
+                        })
+                        i = j
+                i += 1
+
         # 3. Horizontal line items (Tesseract OCR / single lines)
         if not goods_rows:
             for line in lines:
@@ -859,6 +912,40 @@ Audit the candidate data against the document text. Return JSON with audit_statu
             custom["cgst_amount"] = custom["sgst"]
             custom["cgst_rate"] = custom.get("sgst_rate", "9.00%")
 
+        # Discount extraction
+        disc_m = re.search(r'Disc\.[^\n]*\n\s*([\d,]+\.\d{2})\s*\n\s*(\d+(?:\.\d+)?)\s*%', raw_text, re.I)
+        if not disc_m:
+            disc_m = re.search(r'(?:Disc|Discount)\.?\s*[:\-]?\s*(\d+(?:\.\d+)?)\s*%\s*[:\-]?\s*([\d,]+\.\d{2})', raw_text, re.I)
+        if disc_m:
+            try:
+                g1 = disc_m.group(1).replace(",", "")
+                g2 = disc_m.group(2).replace(",", "")
+                if "%" in disc_m.group(0) and float(g2) <= 100.0:
+                    disc_val = float(g1)
+                    disc_rate = float(g2)
+                else:
+                    disc_rate = float(g1)
+                    disc_val = float(g2)
+                custom["discount"] = {"rate_percent": disc_rate, "amount": disc_val}
+                custom["discount_amount"] = disc_val
+                custom["discount_rate"] = disc_rate
+            except (ValueError, IndexError):
+                pass
+
+        # IGST extraction
+        igst_m = re.search(r'IGST[^\n]*\n\s*(\d+(?:\.\d+)?)\s*%\s*\n\s*([\d,]+\.\d{2})', raw_text, re.I)
+        if not igst_m:
+            igst_m = re.search(r'IGST\s*(?:@\s*)?(\d+(?:\.\d+)?)\s*%\s*[:\-]?\s*([\d,]+\.\d{2})', raw_text, re.I)
+        if igst_m:
+            try:
+                ig_rate = float(igst_m.group(1))
+                ig_val = float(igst_m.group(2).replace(",", ""))
+                custom["igst"] = ig_val
+                custom["igst_amount"] = ig_val
+                custom["igst_rate"] = f"{ig_rate}%"
+            except (ValueError, IndexError):
+                pass
+
         # Taxable Value & Financial Totals
         actual_item_rows = [r for r in goods_rows if r.get("SI No") != "-" and r.get("Amount") and r["Amount"] != "-"]
         item_amounts = []
@@ -871,7 +958,9 @@ Audit the candidate data against the document text. Return JSON with audit_statu
         computed_taxable = sum(item_amounts) if item_amounts else None
 
         if "taxable_value" not in custom:
-            taxable_m = re.search(r'(?:Taxable\s*Value|Assessable\s*Value)\s*[:\-\s₹Rs\.]*([\d,]+\.\d{2})', raw_text, re.I)
+            taxable_m = re.search(r'(?:Tax(?:a)?ble\s*Value|Assessable\s*Value)\s*[:\-\s₹Rs\.]*([\d,]+\.\d{2})', raw_text, re.I)
+            if not taxable_m:
+                taxable_m = re.search(r'Tax(?:a)?ble\s*Value[^\n]*\n\s*([\d,]+\.\d{2})', raw_text, re.I)
             if not taxable_m:
                 taxable_m = re.search(r'([\d,]+\.\d{2})\s*\n\s*[\d\.]+\s*\n\s*[A-Za-z0-9\.]+\s*\n\s*Total', raw_text, re.I)
             if taxable_m:
@@ -880,7 +969,8 @@ Audit the candidate data against the document text. Return JSON with audit_statu
                 except ValueError:
                     pass
             elif computed_taxable:
-                custom["taxable_value"] = computed_taxable
+                disc_val = (custom.get("discount") or {}).get("amount", 0.0)
+                custom["taxable_value"] = round(computed_taxable - disc_val, 2) if disc_val > 0 else computed_taxable
 
         cgst_val = custom.get("cgst", 0.0)
         sgst_val = custom.get("sgst", 0.0)
@@ -1157,13 +1247,22 @@ Audit the candidate data against the document text. Return JSON with audit_statu
                     seller_name = cand
 
         if not seller_name:
-            for l in lines[:5]:
-                if any(k in l.upper() for k in ["ENTERPRISES", "SOLUTIONS", "CONCRETE", "INFRA", "PVT", "LTD", "TRADERS", "COMPANY", "CORP", "ASSOCIATES", "INDUSTRIES"]):
+            for l in lines[:10]:
+                if any(k in l.upper() for k in ["ENTERPRISES", "SOLUTIONS", "CONCRETE", "INFRA", "PVT", "LTD", "TRADERS", "COMPANY", "CORP", "ASSOCIATES", "INDUSTRIES", "PROCESSORS", "PROCESS", "TEXTILE", "MILLS", "FABRICS", "FAB"]):
                     seller_name = l.strip()
                     break
 
-        pans = list(set(re.findall(r'\b[A-Z]{5}\d{4}[A-Z]\b', raw_text)))
-        gstins = list(set(re.findall(r'\b\d{2}[A-Z]{5}\d{4}[A-Z\d]{1}[A-Z\d]{1}Z[A-Z\d]{1}\b', raw_text)))
+        found_pans = re.findall(r'\b[A-Z]{5}\d{4}[A-Z]\b', raw_text)
+        pans = []
+        for p in found_pans:
+            if p not in pans:
+                pans.append(p)
+
+        found_gstins = re.findall(r'\b\d{2}[A-Z]{5}\d{4}[A-Z\d]{1}[A-Z\d]{1}Z[A-Z\d]{1}\b', raw_text)
+        gstins = []
+        for g in found_gstins:
+            if g not in gstins:
+                gstins.append(g)
         
         seller_pan = custom.get("company_pan")
         if header_txt and not seller_pan:
@@ -1176,20 +1275,6 @@ Audit the candidate data against the document text. Return JSON with audit_statu
 
         if not seller_pan and pans:
             seller_pan = pans[0]
-
-        seller_gstin = None
-        if header_txt:
-            sg_m = re.search(r'GST[A-Z\s]*NO\.?\s*[:\-\.]*\s*([A-Z0-9\(\)\!\{\}\?]{13,18})', header_txt, re.I)
-            if sg_m:
-                seller_gstin = self._clean_gstin(sg_m.group(1), pan=seller_pan)
-
-        if not seller_gstin and seller_pan and gstins:
-            for g in gstins:
-                if seller_pan in g:
-                    seller_gstin = g
-                    break
-        if not seller_gstin and gstins:
-            seller_gstin = gstins[0]
 
         cin = None
         if header_txt:
@@ -1206,6 +1291,11 @@ Audit the candidate data against the document text. Return JSON with audit_statu
             addr_m = re.search(r'Regd\.?\s*Office\s*[:\-]?\s*([^\n]+)', header_txt, re.I)
             if addr_m:
                 seller_addr = addr_m.group(1).replace("1 |. ", "").replace("OMS", "CHS").strip()
+
+        if not seller_addr:
+            post_m = re.search(r'POSTAL\s*[:\-]\s*([^\n]+)', raw_text, re.I)
+            if post_m:
+                seller_addr = post_m.group(1).strip()
 
         if not seller_addr and seller_name:
             s_pos = raw_text.find(seller_name)
@@ -1224,10 +1314,18 @@ Audit the candidate data against the document text. Return JSON with audit_statu
             seller_email = em_m.group(1).strip().rstrip(".,;")
 
         seller_phone = None
-        if header_txt:
-            ph_m = re.search(r'(?:Tel|Phone|Mob)[^\d]*(\d{10})', header_txt, re.I)
-            if ph_m:
-                seller_phone = ph_m.group(1)
+        seller_contact_person = None
+        scp_m = re.search(r'([A-Za-z\s]{3,30})\s*[-:]\s*([6-9]\d{9})', raw_text[:500])
+        if scp_m:
+            c_lines = scp_m.group(1).strip().splitlines()
+            seller_contact_person = c_lines[-1].strip()
+            seller_phone = scp_m.group(2).strip()
+
+        if not seller_phone:
+            if header_txt:
+                ph_m = re.search(r'(?:Tel|Phone|Mob)[^\d]*(\d{10})', header_txt, re.I)
+                if ph_m:
+                    seller_phone = ph_m.group(1)
         if not seller_phone:
             ph_m = re.search(r'(?:Contact|Tel|Phone|Mob)[^\d]*(\d{10})', raw_text, re.I)
             if ph_m:
@@ -1240,14 +1338,51 @@ Audit the candidate data against the document text. Return JSON with audit_statu
 
         seller_state = None
         seller_state_code = None
-        state_m = re.search(r'(?:State\s*Name|Name\s*Of\s*State)\s*[:\-]\s*([A-Za-z\s]+?)(?:,|$|\n)', raw_text, re.I)
-        if state_m:
-            seller_state = state_m.group(1).strip()
-        code_m = re.search(r'(?:Sate|State)\s*Code\s*[:\-]\s*(\d{2})', raw_text, re.I)
-        if code_m:
-            seller_state_code = code_m.group(1).strip()
-        elif seller_gstin and len(seller_gstin) >= 2 and seller_gstin[:2].isdigit():
-            seller_state_code = seller_gstin[:2]
+
+        # Check explicit state pair e.g. GUJARAT - 24
+        st_pair_m = re.search(r'\b(GUJARAT|MAHARASHTRA|DELHI|RAJASTHAN|HARYANA|KARNATAKA|TAMIL\s*NADU|WEST\s*BENGAL)\s*[-:]\s*(\d{2})\b', raw_text, re.I)
+        if st_pair_m:
+            cand_st = st_pair_m.group(1).title()
+            cand_sc = st_pair_m.group(2)
+            if (seller_addr and (cand_st.lower() in seller_addr.lower() or "guj" in seller_addr.lower() and cand_sc == "24")) or "gujarat" in raw_text[-800:].lower():
+                seller_state = cand_st
+                seller_state_code = cand_sc
+
+        if not seller_state:
+            state_m = re.search(r'(?:State\s*Name|Name\s*Of\s*State)\s*[:\-]\s*([A-Za-z\s]+?)(?:,|$|\n)', raw_text, re.I)
+            if state_m:
+                seller_state = state_m.group(1).strip()
+            code_m = re.search(r'(?:Sate|State)\s*Code\s*[:\-]\s*(\d{2})', raw_text, re.I)
+            if code_m:
+                seller_state_code = code_m.group(1).strip()
+
+        # Deduce seller GSTIN based on seller state code if known
+        seller_gstin = None
+        if header_txt:
+            sg_m = re.search(r'GST[A-Z\s]*NO\.?\s*[:\-\.]*\s*([A-Z0-9\(\)\!\{\}\?]{13,18})', header_txt, re.I)
+            if sg_m:
+                seller_gstin = self._clean_gstin(sg_m.group(1), pan=seller_pan)
+
+        if not seller_gstin and seller_state_code and gstins:
+            for g in gstins:
+                if g.startswith(seller_state_code):
+                    seller_gstin = g
+                    break
+
+        if not seller_gstin and seller_pan and gstins:
+            for g in gstins:
+                if seller_pan in g:
+                    seller_gstin = g
+                    break
+
+        if not seller_gstin and gstins:
+            seller_gstin = gstins[0]
+
+        if seller_gstin and len(seller_gstin) >= 2 and seller_gstin[:2].isdigit():
+            if not seller_state_code:
+                seller_state_code = seller_gstin[:2]
+            if len(seller_gstin) >= 12 and not seller_pan:
+                seller_pan = seller_gstin[2:12]
 
         if not seller_state and seller_state_code:
             seller_state = GST_STATE_MAP.get(seller_state_code, "Maharashtra")
@@ -1257,6 +1392,7 @@ Audit the candidate data against the document text. Return JSON with audit_statu
 
         seller_details: Dict[str, Any] = {
             "business_name": seller_name or "-",
+            "contact_person": seller_contact_person,
             "address": seller_addr,
             "gstin": seller_gstin,
             "pan": seller_pan,
@@ -1339,6 +1475,19 @@ Audit the candidate data against the document text. Return JSON with audit_statu
                 cand = buyer_m.group(1).strip()
                 if cand:
                     buyer_name = cand
+
+        if not buyer_name:
+            m_s = re.search(r'([A-Za-z0-9\.\s\&]+(?:COMPANY|CO\.|LTD|LLP|PVT|ENTERPRISES|TRADERS))\s*\n\s*M\/s\.?', raw_text)
+            if m_s:
+                buyer_name = m_s.group(1).strip()
+
+        if not buyer_name:
+            b_cand_m = re.search(r'(?:^|\n)\s*([A-Za-z0-9\.\s\&]{3,50}(?:COMPANY|CO\.|LTD|LLP|PVT|ENTERPRISES|TRADERS|CORP|ASSOCIATES|IMPEX|AGENCY))\s*\n\s*GSTIN', raw_text, re.I)
+            if b_cand_m:
+                buyer_name = b_cand_m.group(1).strip()
+
+        if buyer_name:
+            buyer_name = re.sub(r'^\d+\s*', '', buyer_name).strip()
 
         contact_person = None
         cp_m = re.search(r'Contact\s*Person\s*[:\-]\s*([^\n]+)', raw_text, re.I)
@@ -1466,14 +1615,19 @@ Audit the candidate data against the document text. Return JSON with audit_statu
                     if len(cand_po) > 4:
                         po_num = cand_po
 
-        if not inv_num:
+        if not inv_num or inv_num.lower() in ["date", "dated", "tax", "gstin"]:
             inv_num_m = re.search(r'\b([A-Za-z]{1,4}\/\d{4,8}(?:-\d{2,4})?)\b', raw_text)
             if inv_num_m:
                 inv_num = inv_num_m.group(1).strip()
             else:
                 cand_m = re.search(r'Invoice\s*No\.?\s*[:\-\s\n]*([A-Za-z0-9\/\-]+)', raw_text, re.I)
-                if cand_m:
+                if cand_m and cand_m.group(1).lower() not in ["date", "dated", "tax", "gstin"]:
                     inv_num = cand_m.group(1).strip()
+
+        if not inv_num or inv_num.lower() in ["date", "dated", "tax", "gstin"]:
+            in_m = re.search(r'(?:^|\n)\s*(\d{4,8})\s*\n\s*(?:Date|M[\.\/]?s\.?|[A-Za-z\.\s\&]+COMPANY)', raw_text, re.I)
+            if in_m:
+                inv_num = in_m.group(1).strip()
 
         if not inv_date:
             dated_idx = None
@@ -1490,9 +1644,14 @@ Audit the candidate data against the document text. Return JSON with audit_statu
                             inv_date = self._format_date_iso(pm.group(1))
                             break
             if not inv_date:
-                d_m = re.search(r'(?:Dated\.?|Invoice\s*Date)\s*[:\-\s\n]*(\d{1,2}[\/\-\.](?:[A-Za-z]{3}|\d{1,2})[\/\-\.]\d{2,4})', raw_text, re.I)
-                if d_m:
-                    inv_date = self._format_date_iso(d_m.group(1))
+                dt_m = re.search(r'Date[^\d\n]*\n\s*(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})', raw_text, re.I)
+                if dt_m:
+                    inv_date = self._format_date_iso(dt_m.group(1))
+
+        if not inv_date:
+            d_m = re.search(r'(?:Dated\.?|Invoice\s*Date)\s*[:\-\s\n]*(\d{1,2}[\/\-\.](?:[A-Za-z]{3}|\d{1,2})[\/\-\.]\d{2,4})', raw_text, re.I)
+            if d_m:
+                inv_date = self._format_date_iso(d_m.group(1))
 
         if not period_start:
             period_start = inv_date
@@ -1591,29 +1750,53 @@ Audit the candidate data against the document text. Return JSON with audit_statu
                 ack_dt = self._format_date_iso(ack_dt_text_m.group(1).strip())
 
         irn_val = None
-        irn_m = re.search(r'IRN\s*[:\-]?\s*([a-f0-9\s\n\-]{40,90})', raw_text, re.I)
+        irn_m = re.search(r'\b([a-f0-9]{64})\b', raw_text, re.I)
         if irn_m:
-            cand_irn = re.sub(r'[\s\n]+', '', irn_m.group(1))
-            hex_count = 0
-            clean_irn_chars = []
-            for ch in cand_irn:
-                if ch in "0123456789abcdefABCDEF":
-                    if hex_count < 64:
-                        clean_irn_chars.append(ch)
-                        hex_count += 1
-                elif ch == '-' and 0 < hex_count < 64:
-                    clean_irn_chars.append(ch)
-            if hex_count == 64:
-                irn_val = "".join(clean_irn_chars)
-        if not irn_val:
-            irn_pos = combined_einv.lower().find("irn")
-            search_irn_str = combined_einv[irn_pos:] if irn_pos != -1 else combined_einv
-            clean_hex = re.sub(r'[^a-f0-9]', '', search_irn_str.lower())
-            for i in range(len(clean_hex) - 63):
-                cand_irn = clean_hex[i:i+64]
-                if len(cand_irn) == 64:
-                    irn_val = cand_irn
-                    break
+            irn_val = irn_m.group(1).lower()
+
+        # Transport & Logistics Metadata
+        transport = None
+        tm = re.search(r'Transport\s*\n\s*([^\n]+)', raw_text, re.I)
+        if tm:
+            transport = tm.group(1).strip()
+
+        lr_no = None
+        lr_m = re.search(r'Lr\s*No[\s\S]+?HAND\s*TO\s*HAND', raw_text, re.I)
+        if lr_m:
+            lr_no = "HAND TO HAND"
+        else:
+            lr_m2 = re.search(r'Lr\s*No\.?\s*[:\-]?\s*([A-Za-z0-9\s\-]+)', raw_text, re.I)
+            if lr_m2 and not lr_m2.group(1).lower().startswith("date"):
+                lr_no = lr_m2.group(1).strip()
+
+        town = None
+        tw_m = re.search(r'Transport\s*\n\s*[^\n]+\n\s*([A-Za-z]+)', raw_text, re.I)
+        if tw_m and tw_m.group(1).lower() not in ["invoice", "date", "gst"]:
+            town = tw_m.group(1).upper()
+        if not town:
+            tw_m2 = re.search(r'\b(MUMBAI|DELHI|PUNE|SURAT|AHMEDABAD|JETPUR|RAJKOT)\b', raw_text[:800], re.I)
+            if tw_m2:
+                town = tw_m2.group(1).upper()
+
+        note = None
+        nm = re.search(r'Note\s*[:\-]?\s*([^\n]+)', raw_text, re.I)
+        if nm:
+            note = nm.group(1).strip(": ")
+
+        hsn_meta = None
+        hm = re.search(r'HSN\s*CODE\s*[:\-]?\s*[\s\S]+?(\d{6,8})', raw_text, re.I)
+        if hm:
+            hsn_meta = hm.group(1)
+
+        parcel_count = None
+        pm = re.search(r'Parcel[\s\S]+?\n\s*(\d{1,4})\s*\n', raw_text, re.I)
+        if pm:
+            parcel_count = int(pm.group(1))
+
+        dispatch_type = "DIRECT" if "DIRECT" in raw_text else None
+
+        eway_m = re.search(r'E\s*Waybill\s*No\.?\s*[:\-]?\s*(\d{10,14})', raw_text, re.I)
+        eway_val = eway_m.group(1).strip() if eway_m else None
 
         # Dispatch and delivery meta
         disp_doc = None
@@ -1646,6 +1829,13 @@ Audit the candidate data against the document text. Return JSON with audit_statu
         invoice_details = {
             "invoice_number": inv_num or "-",
             "invoice_date": inv_date,
+            "transport": transport,
+            "lr_number": lr_no,
+            "parcel_count": parcel_count,
+            "dispatch_type": dispatch_type,
+            "town": town,
+            "note": note,
+            "hsn_code": hsn_meta,
             "delivery_note_number": del_note,
             "dispatch_document_number": disp_doc,
             "destination": dest_val,
@@ -1653,6 +1843,7 @@ Audit the candidate data against the document text. Return JSON with audit_statu
             "acknowledgement_number": ack_no,
             "acknowledgement_date": ack_dt,
             "irn": irn_val,
+            "e_waybill_number": eway_val,
             "period": clean_period
         }
         if site_name:
@@ -1711,6 +1902,12 @@ Audit the candidate data against the document text. Return JSON with audit_statu
                 "unit_rate": rate_val,
                 "amount": amt_val
             }
+            if r.get("bale_number"):
+                item_obj["bale_number"] = r["bale_number"]
+            if "approx_meters" in r:
+                item_obj["approx_meters"] = r["approx_meters"]
+            if "pieces" in r:
+                item_obj["pieces"] = r["pieces"]
             if r.get("additional_details"):
                 item_obj["additional_details"] = r["additional_details"]
             items.append(item_obj)
@@ -1718,7 +1915,20 @@ Audit the candidate data against the document text. Return JSON with audit_statu
 
         tot_qty_val = sum(it["quantity"] for it in items) if items else 0.0
         tot_qty_unit = items[0]["unit"] if items else "Mtr"
-        subtotal_val = custom.get("taxable_value") or sum(it["amount"] for it in items)
+        
+        gross_amt = sum(it["amount"] for it in items) if items else 0.0
+        has_pieces = any("pieces" in it for it in items)
+        tot_pieces = sum(it.get("pieces", 0) for it in items) if has_pieces else None
+        tot_pcs_m = re.search(r'(\d{3,6})\s*\n\s*Total\b', raw_text, re.I)
+        if tot_pcs_m and has_pieces:
+            tot_pieces = int(tot_pcs_m.group(1))
+
+        discount_obj = custom.get("discount")
+        disc_amt = discount_obj.get("amount", 0.0) if discount_obj else 0.0
+
+        subtotal_val = custom.get("taxable_value")
+        if not subtotal_val:
+            subtotal_val = round(gross_amt - disc_amt, 2) if disc_amt > 0 else round(gross_amt, 2)
 
         cgst_amt = custom.get("cgst", 0.0)
         sgst_amt = custom.get("sgst", 0.0)
@@ -1758,6 +1968,18 @@ Audit the candidate data against the document text. Return JSON with audit_statu
         if sgst_pct is None:
             sgst_pct = cgst_pct
 
+        igst_pct = None
+        if igst_amt is not None and igst_amt > 0:
+            if custom.get("igst_rate"):
+                try:
+                    igst_pct = float(custom["igst_rate"].replace("%", ""))
+                except ValueError:
+                    pass
+            if igst_pct is None and subtotal_val > 0:
+                igst_pct = round((igst_amt / subtotal_val) * 100, 2)
+            if igst_pct is None:
+                igst_pct = 5.0
+
         rounding_adj = custom.get("rounding_adjustment")
         if rounding_adj is None:
             ro_m = re.search(r'Round\s*Off\s*[:\-]?\s*(?:\(?\s*([\-]?)\s*\)?\s*([0-9\.]+))', raw_text, re.I)
@@ -1768,12 +1990,43 @@ Audit the candidate data against the document text. Return JSON with audit_statu
                 except ValueError:
                     pass
 
-        tot_tax_val = custom.get("total_tax_amount") or round(cgst_amt + sgst_amt, 2)
-        calc_total = round(subtotal_val + tot_tax_val + (rounding_adj or 0.0), 2)
+        if igst_amt is not None and igst_amt > 0:
+            tot_tax_val = igst_amt
+            calc_total = round(subtotal_val + tot_tax_val + (rounding_adj or 0.0), 2)
+            tax_dict = {
+                "cgst": None,
+                "sgst": None,
+                "igst": {
+                    "rate_percent": igst_pct,
+                    "amount": igst_amt
+                },
+                "total_tax": round(tot_tax_val, 2),
+                "rounding_adjustment": rounding_adj
+            }
+        else:
+            tot_tax_val = custom.get("total_tax_amount") or round(cgst_amt + sgst_amt, 2)
+            calc_total = round(subtotal_val + tot_tax_val + (rounding_adj or 0.0), 2)
+            tax_dict = {
+                "cgst": {
+                    "rate_percent": cgst_pct,
+                    "amount": cgst_amt
+                },
+                "sgst": {
+                    "rate_percent": sgst_pct,
+                    "amount": sgst_amt
+                },
+                "igst": None,
+                "total_tax": round(tot_tax_val, 2),
+                "rounding_adjustment": rounding_adj
+            }
 
         gt_cand = None
         gt_m = re.search(r'Total\s+[\d,\.]+\s+[A-Za-z0-9\.\/]+\s+[^\d\n]*([\d,]+\.\d{2})', raw_text, re.I)
-        if gt_m:
+        if not gt_cand:
+            tot_inv_m = re.search(r'Total\s*Value\s*Of\s*invoice[^\n]*\n\s*([\d,]+\.\d{2})', raw_text, re.I)
+            if tot_inv_m:
+                gt_cand = float(tot_inv_m.group(1).replace(",", ""))
+        if gt_m and not gt_cand:
             try:
                 gt_cand = float(gt_m.group(1).replace(",", ""))
             except ValueError:
@@ -1786,6 +2039,8 @@ Audit the candidate data against the document text. Return JSON with audit_statu
             aw_m = re.search(r'Amount\s*in\s*words\s*[:\-]?\s*([A-Za-z\s]+(?:Only|only)\.?)', rem_source, re.I)
             if not aw_m:
                 aw_m = re.search(r'(?:Amount\s*Chargeable\s*\(in\s*words\)|\bAmount\s*in\s*words)\s*[:\-]?\s*([A-Za-z\s]+(?:Only|only)\.?)', raw_text, re.I)
+            if not aw_m:
+                aw_m = re.search(r'Rs\.\s*In\s*Words[^\n]*\n\s*([A-Za-z\s]+(?:Only|only))', raw_text, re.I)
             if aw_m:
                 amt_words = aw_m.group(1).strip()
 
@@ -1793,21 +2048,6 @@ Audit the candidate data against the document text. Return JSON with audit_statu
         tw_m = re.search(r'Tax\s*Amount\s*\(in\s*words\)\s*[:\-]?\s*([A-Za-z0-9\s\,\.]+(?:Only|only)\.?)', raw_text, re.I)
         if tw_m:
             tax_words = tw_m.group(1).strip()
-
-        tax_dict: Dict[str, Any] = {
-            "cgst": {
-                "rate_percent": cgst_pct,
-                "amount": cgst_amt
-            },
-            "sgst": {
-                "rate_percent": sgst_pct,
-                "amount": sgst_amt
-            },
-            "igst": None
-        }
-        if rounding_adj is not None:
-            tax_dict["rounding_adjustment"] = rounding_adj
-        tax_dict["total_tax"] = round(tot_tax_val, 2)
 
         goods_and_tax_details = {
             "items": items,
@@ -1818,6 +2058,12 @@ Audit the candidate data against the document text. Return JSON with audit_statu
             "total_amount_after_tax": round(grand_total_val, 2),
             "amount_in_words": amt_words
         }
+        if tot_pieces is not None:
+            goods_and_tax_details["total_pieces"] = tot_pieces
+        if gross_amt and disc_amt:
+            goods_and_tax_details["gross_amount"] = round(gross_amt, 2)
+        if discount_obj:
+            goods_and_tax_details["discount"] = discount_obj
         if tax_words:
             goods_and_tax_details["tax_amount_in_words"] = tax_words
 
@@ -1829,9 +2075,26 @@ Audit the candidate data against the document text. Return JSON with audit_statu
         acc_no = bd.get("account_number") or "-"
         ifsc = bd.get("ifsc_code") or "-"
 
-        b_name_m = re.search(r'(?:Bank\s*Name|Bank)\s*[:\-]\s*([A-Za-z\s]+(?:BANK|Bank|LTD|Ltd|\.))', bank_source, re.I)
-        if b_name_m:
-            bank_name = b_name_m.group(1).strip()
+        hb_m = re.search(r'([A-Za-z\s]+(?:BANK|Bank)\s*(?:LTD|Ltd)?)\s*-\s*A\/C\s*NO\.?\s*[:\-]?\s*(\d+)', bank_source, re.I)
+        if hb_m:
+            b_cand = hb_m.group(1).strip()
+            bank_name = b_cand.splitlines()[-1].strip()
+            acc_no = hb_m.group(2).strip()
+
+        if not bank_name or bank_name == "-":
+            b_name_m = re.search(r'(?:Bank\s*Name|Bank)\s*[:\-]\s*([A-Za-z\s]+(?:BANK|Bank|LTD|Ltd|\.))', bank_source, re.I)
+            if b_name_m:
+                bank_name = b_name_m.group(1).strip()
+
+        if not ifsc or ifsc == "-":
+            ifsc_lbl_m = re.search(r'IFSC\s*CODE\s*[-:]\s*([A-Z0-9]+)', bank_source, re.I)
+            if ifsc_lbl_m:
+                ifsc = ifsc_lbl_m.group(1).strip()
+
+        if not branch or branch == "-":
+            br_lbl_m = re.search(r'BRANCH\s*NAME\s*[-:]\s*([^\n,]+)', bank_source, re.I)
+            if br_lbl_m:
+                branch = br_lbl_m.group(1).strip()
 
         b_br_m = re.search(r'Branch\s*&?\s*IFS\s*Code\s*[:\-]?\s*([^\n]+)', bank_source, re.I)
         if b_br_m:
@@ -1848,7 +2111,7 @@ Audit the candidate data against the document text. Return JSON with audit_statu
                 branch = b_br_m2.group(1).strip()
 
         b_acc_m = re.search(r'(?:A/c\s*(?:No\.?)?|Account\s*No\.?)\s*[:\-]?\s*([\d\s]{8,25})', bank_source, re.I)
-        if b_acc_m:
+        if b_acc_m and (not acc_no or acc_no == "-"):
             acc_cand = re.sub(r'\s+', '', b_acc_m.group(1).strip())
             if len(acc_cand) >= 9:
                 acc_no = acc_cand
